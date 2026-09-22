@@ -20,3 +20,8 @@ No captures are needed at test runtime.
 The tests replay the baseline exchange byte for byte, check the swap's three
 specific byte changes, and confirm manual Fn restoration returns all four maps
 to baseline. Fault tests use altered copies of these reports.
+
+`rows.toml` is the human-readable schema version 2 representation of the
+captured startup base/Fn maps. Its serial is fictional; the public PD-KB800WNS
+model name identifies the supported US layout. Tests check that it decodes to
+exactly the captured maps, including every preserved byte.

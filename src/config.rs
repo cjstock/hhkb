@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+mod visual;
+pub use visual::{action_byte, action_name, diff_keymaps, format_toml};
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct KeyboardConfig {
     pub profile: Profile,
@@ -71,6 +74,15 @@ impl CurrentKeymaps {
     }
 
     pub fn from_toml(text: &str) -> anyhow::Result<Self> {
+        let document: toml::Value = toml::from_str(text)?;
+        let version = document
+            .get("schema_version")
+            .and_then(toml::Value::as_integer)
+            .ok_or_else(|| anyhow::anyhow!("schema_version must be an integer"))?;
+        if version == 2 {
+            return visual::from_toml(text);
+        }
+        anyhow::ensure!(version == 1, "Unsupported schema version {version}");
         let config: Self = toml::from_str(text)?;
         config.validate()?;
         Ok(config)
@@ -79,6 +91,11 @@ impl CurrentKeymaps {
     pub fn to_toml(&self) -> anyhow::Result<String> {
         self.validate()?;
         Ok(toml::to_string_pretty(self)?)
+    }
+
+    /// Export the US-layout row format without losing unmapped raw bytes.
+    pub fn to_visual_toml(&self) -> anyhow::Result<String> {
+        visual::to_toml(self)
     }
 }
 
