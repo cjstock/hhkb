@@ -1,2 +1,9 @@
 target/
-docs/
+# Local device exports and packet captures; sanitized fixtures live in tests/.
+/caps/
+/hhkb.toml
+/*.toml.backup-*.toml
+docs/*
+!docs/protocol.md
+!docs/hardware-acceptance.md
+!docs/row-format.md
