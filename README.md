@@ -155,7 +155,15 @@ usage above describes the **current CLI**; items marked Planned below are not
 implemented yet. Done means present in the current code, Verify means the
 behavior or device values still need evidence, Open means a design choice
 remains, Deferred means intentionally outside the first version, and Excluded
-means deliberately omitted. Keep this section current as work lands.
+means deliberately omitted. Keep this section current as work lands. The
+[GitHub work issue template](.github/ISSUE_TEMPLATE/work.md) uses Goal, Stories,
+Acceptance Criteria, and Other Info for every scoped task. Issue status is the
+source of truth for implementation progress:
+
+- [Portable profile and CLI epic](https://github.com/cjstock/hhkb/issues/1)
+- [Standalone LSP epic](https://github.com/cjstock/hhkb/issues/2)
+- [Neovim editing and layout epic](https://github.com/cjstock/hhkb/issues/3)
+- [Neovim device and recovery epic](https://github.com/cjstock/hhkb/issues/4)
 
 ### Profile format and names
 
