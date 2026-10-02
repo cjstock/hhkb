@@ -148,7 +148,109 @@ row format. `read_snapshot()` exposes all four maps and sleep time.
 See [verified protocol behavior](docs/protocol.md) and
 [hardware acceptance](docs/hardware-acceptance.md).
 
-### Packet Sniffing / Wireshark
+## LSP and Neovim plugin design
+
+This is the agreed design and implementation tracker for the next phase. The
+usage above describes the **current CLI**; items marked Planned below are not
+implemented yet. Done means present in the current code, Verify means the
+behavior or device values still need evidence, Open means a design choice
+remains, Deferred means intentionally outside the first version, and Excluded
+means deliberately omitted. Keep this section current as work lands.
+
+### Profile format and names
+
+| Feature or sub-feature | Status | Agreed behavior |
+| --- | --- | --- |
+| Base/Fn physical rows, shortcuts, reserved Fn positions, schema version 1 | Done | Keep the current compact TOML arrays and five physical rows per layer. |
+| Sparse opaque-byte preservation | Done | Export only nonzero nonphysical bytes; omit `[preservation]` when all are zero. |
+| Portable profile metadata | Planned | Remove parsed `layout`, `model`, and `serial` fields. Export them as informational comments only; a serial never binds a profile to one keyboard. |
+| Current mode support | Done | Only mode 0 and the current US physical row layout are supported today. |
+| Mode-specific layouts | Deferred | Design and support different layouts for each mode later. |
+| Editable sleep setting | Planned | Add top-level integer `sleep_minutes` to export, validation, Diff, Apply, backup, and Restore. |
+| Supported sleep values | Verify | Extract the exact choices from the official tool; completion and validation accept only those choices. |
+| Short canonical action names | Planned | Prefer familiar names such as `Esc`, `Bksp`, `Del`, `PgUp`, `PrtSc`, and `VolUp` in new exports. Continue accepting full names and aliases. |
+| Preserve spelling during formatting | Planned | Formatting aligns rows and physical-label comments without rewriting a valid action or shortcut spelling. An explicit normalize action may use the short canonical names. |
+| Portable Apply and opaque bytes | Planned | Before writing, check the connected keyboard's physical layout. Normal Apply keeps that keyboard's nonphysical bytes rather than copying opaque bytes from the profile. Exact opaque-byte restoration belongs to Restore Backup. |
+
+The existing schema-1 parser still requires the metadata fields and the current
+formatter still canonicalizes aliases. Those are migration tasks, not properties
+of the planned format. The file's row structure will identify the supported
+physical layout; the connected keyboard supplies the actual model and serial.
+There is no profile-binding step. Layout detection from device information must
+be verified before enabling writes across different models.
+
+### Standalone language server
+
+| Feature or sub-feature | Status | Agreed behavior |
+| --- | --- | --- |
+| Editor-independent LSP process | Planned | Keep TOML editing features in a standalone server usable beyond Neovim; it does not need keyboard access. |
+| File association | Planned | Attach by `*.hhkb.toml`, including empty or temporarily invalid files. Validate the contents after attachment and coexist with general TOML tooling. |
+| Diagnostics | Planned | Diagnose while typing and again on save, with ranges on the exact bad assignment or field. Cover row lengths, unknown actions, shortcut syntax, reserved positions, schema, and sleep values. |
+| Save an invalid draft | Planned | Allow ordinary saves with diagnostics; skip formatting until the document is valid. Block Apply until validation passes. |
+| Action and shortcut completion | Planned | Complete keys, official action aliases, shortcut modifiers and components. Make common-first versus full-catalog ordering configurable; common-first is the default. |
+| Hover | Planned | Show the physical position, complete assignment, meaning, and encoded key/modifier bytes. |
+| Quick fixes | Planned | Offer clear corrections such as a misspelled action name or restoring `Reserved` at an Fn position. |
+| Formatting | Planned | Expose the alias-preserving row formatter through the LSP. The Neovim plugin enables format-on-save by default, with a setting to disable it. |
+| Cursor display | Excluded | Do not add a persistent per-key cursor/status display while editing TOML. |
+
+### Neovim layout view
+
+| Feature or sub-feature | Status | Agreed behavior |
+| --- | --- | --- |
+| Window | Planned | Open over the TOML in a floating window by default; allow a configurable split instead. |
+| Live source | Planned | Reflect unsaved buffer changes. Keep valid keys visible while marking incomplete or invalid entries rather than dropping the whole view. |
+| Layer display | Planned | Show one layer at a time; `Tab` toggles Base/Fn. Keycaps show assigned actions only. |
+| Keycap labels | Planned | Use short canonical action names. Render shortcut modifiers as symbols: `⌃` Ctrl, `⇧` Shift, `⌥` Alt, and `⌘` Meta (for example `⌃⇧C`). Show left/right modifier detail only for the selected key. |
+| Selection detail | Planned | Show the selected key's physical position and full assignment outside the keycap. |
+| Vim navigation | Planned | `h`/`l` move across keys, `j`/`k` move to the nearest key on the adjacent row, `0`/`^`/`$` jump within a row, and `gg`/`G` move to the first/last row. Support counts. |
+| Jump to TOML | Planned | `Enter` jumps from the selected key to its assignment string in the source buffer. |
+| Device diff highlights | Planned | Highlight changed keys in the layout when a device Diff or Apply preview is open. |
+
+### Device commands and first use
+
+The plugin exposes commands such as `:HHKBLayout`, `:HHKBDiff`,
+`:HHKBApply`, `:HHKBExport`, `:HHKBRefresh`, `:HHKBRestore`, and
+`:HHKBInspect`. These names are provisional. Window-local navigation has
+defaults; global Neovim key mappings are left to the user.
+
+| Feature or sub-feature | Status | Agreed behavior |
+| --- | --- | --- |
+| Explicit device reads | Planned | Read the keyboard only for Export, Refresh, Diff, Apply, Restore, Inspect, or an explicit recovery action. The layout view itself uses the buffer. |
+| Export destination | Planned | Both CLI and plugin default to `~/.config/hhkb/profiles/default.hhkb.toml`. Create the profile directory if needed; never silently overwrite an existing profile. Ask for another name on collision. |
+| Offline first profile | Planned | If Export finds no connected keyboard, create a profile from the user's current layout as a bundled template, without device identity fields. It remains editable offline. |
+| Bundled template source | Verify | Capture the user's current assignments for the shipped template and remove device-identifying metadata. |
+| Inspect Device | Planned | Show connection status, model, serial, running firmware, mode, DIP switches, and sleep setting in a floating panel. |
+| Text diff | Done in CLI; planned in plugin | The CLI already reports key, shortcut, and opaque-byte changes. Add sleep changes and present the list in Neovim; highlight changed keycaps too. |
+| Apply flow | Planned | Validate the current buffer, format and save it if valid, read the device, check layout compatibility, show text and layout diffs, then request confirmation in Neovim's bottom message area. Make a backup, write, read back, and report verification. Do not write when there are no changes. |
+| Refresh From Keyboard | Planned | Back up the open buffer, including unsaved edits, ask for confirmation, then replace it with a fresh device export. |
+| Restore Backup | Planned | List backups beside the current profile, preview the chosen backup against the device, save a copy of the current buffer, replace the open file, then require confirmation before exact restoration and readback verification. |
+| Profile picker | Planned | List `*.hhkb.toml` profiles, show their filenames and available device comments, open a selection, and allow Diff/Apply from it. |
+| Profile search paths | Planned | Search configured paths first, then the open profile's directory, then the project root and its `profiles/` directory, then `~/.config/hhkb/profiles`. Search shallowly by default and remove duplicates. |
+
+Apply to a different serial is allowed when the physical layout is compatible;
+serial comments are informational. The current mode-0 constraint still applies.
+The existing CLI already backs up imports and verifies readback, but it
+currently requires identity matching, preserves the device's sleep value, and
+writes opaque profile bytes. These behaviors must change for the portable
+profile design.
+
+### Recovery
+
+| Feature or sub-feature | Status | Agreed behavior |
+| --- | --- | --- |
+| Partial write or readback mismatch | Planned | Stop writing and attempt a fresh read-only snapshot. Show what actually differs from the intended profile and the backup. |
+| Device cannot be read after failure | Planned | Keep the backup and report that the keyboard state is unknown. |
+| Manual recovery | Planned | Offer Retry Apply and Restore Backup, each with a fresh device read, diff, and confirmation. Never perform an automatic rollback write. |
+| Exact-restore provenance | Open | Decide how to confirm a backup belongs to the connected keyboard before restoring its opaque bytes, without making ordinary profiles serial-bound. |
+
+### Remaining CLI and device questions
+
+| Item | Status | What remains |
+| --- | --- | --- |
+| Physical-layout detection | Verify | Confirm how the connected keyboard exposes or implies its physical layout so a portable profile can be checked before writing. |
+| Bare CLI Diff and Format paths | Open | Decide whether commands without a path should use the new default profile path, like Export. |
+
+## Packet Sniffing / Wireshark
 
 A helper script is provided in `scripts/device.sh` to configure the Linux `usbmon` kernel module and find the appropriate bus/device addresses for capturing USB packets with Wireshark.
 
