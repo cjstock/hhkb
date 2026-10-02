@@ -25,3 +25,9 @@ to baseline. Fault tests use altered copies of these reports.
 captured startup base/Fn maps. Its serial is fictional; the public PD-KB800WNS
 model name identifies the supported US layout. Tests check that it decodes to
 exactly the captured maps, including every preserved byte.
+
+`official-action-codes.hex` is a code-only catalog extracted from the official
+Windows Professional Keymap Tool 2.0.1, rather than a USB capture. It covers
+English/Japanese assignable keys and English shortcut component keys. See
+[the action provenance](../../docs/actions.md#evidence-and-validation) for the
+installer hash, source methods, and distinction from hardware verification.

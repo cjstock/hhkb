@@ -7,3 +7,4 @@ docs/*
 !docs/protocol.md
 !docs/hardware-acceptance.md
 !docs/row-format.md
+!docs/actions.md
