@@ -24,9 +24,6 @@ enum Command {
     Export {
         #[arg(default_value = "hhkb.toml")]
         path: PathBuf,
-        /// Export version 1 byte arrays, including modifier maps, instead of rows.
-        #[arg(long)]
-        raw: bool,
     },
     /// Validate, back up, write, and verify base and Fn assignments.
     Import { path: PathBuf },
@@ -35,7 +32,7 @@ enum Command {
         #[arg(default_value = "hhkb.toml")]
         path: PathBuf,
     },
-    /// Align rows in place, retain comments, or upgrade a raw export to rows.
+    /// Align rows in place and retain comments.
     Format {
         #[arg(default_value = "hhkb.toml")]
         path: PathBuf,
@@ -125,13 +122,9 @@ fn main() -> Result<()> {
     };
     let hhkb = Hhkb::new()?;
     match cli.command {
-        Some(Command::Export { path, raw }) => {
+        Some(Command::Export { path }) => {
             let config = hhkb.read_current_keymaps()?;
-            let text = if raw {
-                config.to_toml()?
-            } else {
-                config.to_visual_toml()?
-            };
+            let text = config.to_toml()?;
             save_document_new(&path, &text)?;
             println!("Exported {}", path.display());
         }
@@ -176,7 +169,7 @@ mod tests {
     use hhkb::config::{Keymap, ModifierKeymaps};
 
     #[test]
-    fn formatting_upgrades_without_changing_bytes_and_keeps_invalid_input() {
+    fn formatting_preserves_bytes_and_keeps_invalid_input() {
         let directory = std::env::temp_dir().join(format!(
             "hhkb-format-{}",
             SystemTime::now()
@@ -193,12 +186,15 @@ mod tests {
             mode: 0,
             base: Keymap(std::array::from_fn(|i| i as u8)),
             fn_layer: Keymap([0; 128]),
-            modifiers: None,
+            modifiers: ModifierKeymaps {
+                base: Keymap([0; 128]),
+                fn_layer: Keymap([0; 128]),
+            },
         };
         save_new(&path, &config).unwrap();
         format_file(&path).unwrap();
         let formatted = fs::read_to_string(&path).unwrap();
-        assert!(formatted.contains("schema_version = 2"));
+        assert!(formatted.contains("schema_version = 1"));
         assert_eq!(CurrentKeymaps::from_toml(&formatted).unwrap(), config);
         format_file(&path).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), formatted);
@@ -222,19 +218,19 @@ mod tests {
         let path = directory.join("maps.toml");
         let config = CurrentKeymaps {
             schema_version: 1,
-            model: "test".into(),
+            model: "PD-KB800WNS".into(),
             serial: "test".into(),
             mode: 0,
             base: Keymap([0; 128]),
             fn_layer: Keymap(std::array::from_fn(|i| {
                 if [44, 31, 7].contains(&i) { 0 } else { 1 }
             })),
-            modifiers: Some(ModifierKeymaps {
+            modifiers: ModifierKeymaps {
                 base: Keymap([0xa3; 128]),
                 fn_layer: Keymap(std::array::from_fn(|i| {
                     if [44, 31, 7].contains(&i) { 0 } else { 0x50 }
                 })),
-            }),
+            },
         };
         save_new(&path, &config).unwrap();
         assert!(save_new(&path, &config).is_err());

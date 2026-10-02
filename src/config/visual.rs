@@ -1,6 +1,7 @@
 //! Human-readable US-layout rows, translated losslessly to the raw layer API.
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use super::{
     CurrentKeymaps, FN_RESERVED, Keymap, ModifierKeymaps, assignment_name, parse_assignment,
@@ -259,7 +260,7 @@ impl VisualLayer {
             &self.bottom_row,
         ]
     }
-    fn from_map(layer: &str, map: &Keymap, modifiers: Option<&Keymap>) -> Self {
+    fn from_map(layer: &str, map: &Keymap, modifiers: &Keymap) -> Self {
         let mut rows = ROWS.iter().map(|row| {
             (0..row.labels.len())
                 .map(|column| {
@@ -267,7 +268,7 @@ impl VisualLayer {
                     if layer == "fn" && FN_RESERVED.iter().any(|(reserved, _)| *reserved == index) {
                         "Reserved".into()
                     } else {
-                        assignment_name(map.0[index], modifiers.map_or(0, |m| m.0[index]))
+                        assignment_name(map.0[index], modifiers.0[index])
                     }
                 })
                 .collect()
@@ -283,30 +284,17 @@ impl VisualLayer {
     fn apply(
         &self,
         layer: &str,
-        preserved: Vec<u8>,
-        preserved_modifiers: Option<Vec<u8>>,
-    ) -> Result<(Keymap, Option<Keymap>)> {
-        ensure!(
-            preserved.len() == 68,
-            "preservation.{layer} needs 68 bytes (index 0, then 61..127); found {}",
-            preserved.len()
-        );
-        let mut modifiers = if let Some(bytes) = preserved_modifiers {
-            ensure!(
-                bytes.len() == 68,
-                "preservation.{layer}_modifiers needs 68 bytes; found {}",
-                bytes.len()
-            );
-            let mut map = [0; 128];
-            map[0] = bytes[0];
-            map[61..].copy_from_slice(&bytes[1..]);
-            Some(Keymap(map))
-        } else {
-            None
-        };
-        let mut map = [0; 128];
-        map[0] = preserved[0];
-        map[61..].copy_from_slice(&preserved[1..]);
+        preserved: Option<PreservedBytes>,
+        preserved_modifiers: Option<PreservedBytes>,
+    ) -> Result<(Keymap, Keymap)> {
+        let mut modifiers = preserved_modifiers
+            .map(|bytes| bytes.into_map(&format!("{layer}_modifiers")))
+            .transpose()?
+            .unwrap_or([0; 128]);
+        let mut map = preserved
+            .map(|bytes| bytes.into_map(layer))
+            .transpose()?
+            .unwrap_or([0; 128]);
         for (row, actions) in ROWS.iter().zip(self.rows()) {
             ensure!(
                 actions.len() == row.labels.len(),
@@ -330,14 +318,14 @@ impl VisualLayer {
                     map[index] = 0;
                     continue;
                 }
-                let assignment = if modifiers.is_some() {
-                    parse_assignment(action)
-                } else {
-                    action_byte(action).map(|key| (key, 0)).context(
-                        "Legacy rows do not include modifier data; export a schema version 3 file to edit shortcuts"
-                    )
-                };
-                let (key, mask) = assignment.with_context(|| {
+                ensure!(
+                    !reserved,
+                    "{layer}.{}, position {} (physical {}): Reserved key cannot be remapped",
+                    row.name,
+                    column + 1,
+                    row.labels[column]
+                );
+                let (key, mask) = parse_assignment(action).with_context(|| {
                     format!(
                         "{layer}.{}, position {} (physical {})",
                         row.name,
@@ -345,35 +333,57 @@ impl VisualLayer {
                         row.labels[column]
                     )
                 })?;
-                ensure!(
-                    !reserved || (key == 0 && mask == 0),
-                    "{layer}.{}, position {} (physical {}): Reserved key cannot be remapped",
-                    row.name,
-                    column + 1,
-                    row.labels[column]
-                );
                 map[index] = key;
-                if let Some(modifiers) = &mut modifiers {
-                    modifiers.0[index] = mask;
-                }
+                modifiers[index] = mask;
             }
         }
-        Ok((Keymap(map), modifiers))
+        Ok((Keymap(map), Keymap(modifiers)))
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct PreservedBytes(BTreeMap<String, u8>);
+
+impl PreservedBytes {
+    fn into_map(self, field: &str) -> Result<[u8; 128]> {
+        let mut map = [0; 128];
+        for (index, byte) in self.0 {
+            let position = index
+                .parse::<usize>()
+                .with_context(|| format!("preservation.{field} has invalid index {index:?}"))?;
+            ensure!(
+                position == 0 || (61..128).contains(&position),
+                "preservation.{field} index {position} is not a nonphysical byte"
+            );
+            ensure!(
+                byte != 0,
+                "preservation.{field} index {position} must be nonzero; omit zero entries"
+            );
+            ensure!(
+                map[position] == 0,
+                "preservation.{field} repeats index {position}"
+            );
+            map[position] = byte;
+        }
+        Ok(map)
+    }
+}
+
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Preservation {
-    base: Vec<u8>,
+    #[serde(default)]
+    base: Option<PreservedBytes>,
     #[serde(rename = "fn")]
-    fn_layer: Vec<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    base_modifiers: Option<Vec<u8>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    fn_modifiers: Option<Vec<u8>>,
+    #[serde(default)]
+    fn_layer: Option<PreservedBytes>,
+    #[serde(default)]
+    base_modifiers: Option<PreservedBytes>,
+    #[serde(default)]
+    fn_modifiers: Option<PreservedBytes>,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VisualConfig {
     schema_version: u32,
@@ -384,7 +394,8 @@ struct VisualConfig {
     base: VisualLayer,
     #[serde(rename = "fn")]
     fn_layer: VisualLayer,
-    preservation: Preservation,
+    #[serde(default)]
+    preservation: Option<Preservation>,
 }
 
 fn validate_layout(model: &str, layout: &str) -> Result<()> {
@@ -394,7 +405,7 @@ fn validate_layout(model: &str, layout: &str) -> Result<()> {
     );
     ensure!(
         model.starts_with("PD-KB800"),
-        "Row format supports the PD-KB800 US layout; model {model:?} requires a raw version 1 file"
+        "Row format supports the PD-KB800 US layout; got model {model:?}"
     );
     Ok(())
 }
@@ -402,29 +413,20 @@ fn validate_layout(model: &str, layout: &str) -> Result<()> {
 pub(super) fn from_toml(text: &str) -> Result<CurrentKeymaps> {
     let config: VisualConfig = toml::from_str(text)?;
     ensure!(
-        matches!(config.schema_version, 2 | 3),
-        "Unsupported visual schema version {}",
+        config.schema_version == 1,
+        "Unsupported schema version {}",
         config.schema_version
     );
     validate_layout(&config.model, &config.layout)?;
-    ensure!(
-        (config.schema_version == 3)
-            == (config.preservation.base_modifiers.is_some()
-                && config.preservation.fn_modifiers.is_some())
-            && config.preservation.base_modifiers.is_some()
-                == config.preservation.fn_modifiers.is_some(),
-        "Schema version 3 requires preservation.base_modifiers and preservation.fn_modifiers; version 2 cannot contain them"
-    );
-    let (base, base_modifiers) = config.base.apply(
-        "base",
-        config.preservation.base,
-        config.preservation.base_modifiers,
-    )?;
-    let (fn_layer, fn_modifiers) = config.fn_layer.apply(
-        "fn",
-        config.preservation.fn_layer,
-        config.preservation.fn_modifiers,
-    )?;
+    let preservation = config.preservation.unwrap_or_default();
+    let (base, base_modifiers) =
+        config
+            .base
+            .apply("base", preservation.base, preservation.base_modifiers)?;
+    let (fn_layer, fn_modifiers) =
+        config
+            .fn_layer
+            .apply("fn", preservation.fn_layer, preservation.fn_modifiers)?;
     let raw = CurrentKeymaps {
         schema_version: 1,
         model: config.model,
@@ -432,9 +434,10 @@ pub(super) fn from_toml(text: &str) -> Result<CurrentKeymaps> {
         mode: config.mode,
         base,
         fn_layer,
-        modifiers: base_modifiers
-            .zip(fn_modifiers)
-            .map(|(base, fn_layer)| ModifierKeymaps { base, fn_layer }),
+        modifiers: ModifierKeymaps {
+            base: base_modifiers,
+            fn_layer: fn_modifiers,
+        },
     };
     raw.validate()?;
     Ok(raw)
@@ -448,41 +451,43 @@ pub(super) fn to_toml(raw: &CurrentKeymaps) -> Result<String> {
     raw.validate()?;
     validate_layout(&raw.model, "hhkb-us")?;
     let mut out = format!(
-        "# Physical labels appear above each row; strings below are assigned actions.\n# Base and Fn are independent. Zero/unknown actions retain their raw bytes.\nschema_version = {}\nlayout = \"hhkb-us\"\nmodel = {}\nserial = {}\nmode = {}\n",
-        if raw.modifiers.is_some() { 3 } else { 2 },
+        "# Physical labels appear above each row; strings below are assigned actions.\n# Base and Fn are independent. Zero/unknown actions retain their raw bytes.\nschema_version = 1\nlayout = \"hhkb-us\"\nmodel = {}\nserial = {}\nmode = {}\n",
         quoted(&raw.model),
         quoted(&raw.serial),
         raw.mode
     );
     for (layer, map) in [("base", &raw.base), ("fn", &raw.fn_layer)] {
         out.push_str(&format!("\n[{layer}]\n"));
-        let modifiers = raw.modifiers.as_ref().map(|m| {
-            if layer == "base" {
-                &m.base
-            } else {
-                &m.fn_layer
-            }
-        });
+        let modifiers = if layer == "base" {
+            &raw.modifiers.base
+        } else {
+            &raw.modifiers.fn_layer
+        };
         let visual = VisualLayer::from_map(layer, map, modifiers);
         for (row, actions) in ROWS.iter().zip(visual.rows()) {
             let (labels, values) = render_row(row, actions);
             out.push_str(&format!("{labels}\n{values}\n"));
         }
     }
-    out.push_str("\n# Preserve these bytes: index 0, then indices 61..127. No physical key labels.\n[preservation]\n");
+    let mut preservation = String::new();
     let mut preserved = vec![("base", &raw.base), ("fn", &raw.fn_layer)];
-    if let Some(modifiers) = &raw.modifiers {
-        preserved.extend([
-            ("base_modifiers", &modifiers.base),
-            ("fn_modifiers", &modifiers.fn_layer),
-        ]);
-    }
+    preserved.extend([
+        ("base_modifiers", &raw.modifiers.base),
+        ("fn_modifiers", &raw.modifiers.fn_layer),
+    ]);
     for (layer, map) in preserved {
-        let values: Vec<_> = std::iter::once(map.0[0])
-            .chain(map.0[61..].iter().copied())
-            .map(|byte| format!("0x{byte:02X}"))
+        let values: Vec<_> = std::iter::once(0)
+            .chain(61..128)
+            .filter(|&index| map.0[index] != 0)
+            .map(|index| format!("\"{index}\" = 0x{:02X}", map.0[index]))
             .collect();
-        out.push_str(&format!("{layer} = [{}]\n", values.join(", ")));
+        if !values.is_empty() {
+            preservation.push_str(&format!("{layer} = {{ {} }}\n", values.join(", ")));
+        }
+    }
+    if !preservation.is_empty() {
+        out.push_str("\n# Nonzero bytes outside physical key rows, indexed by raw map position.\n[preservation]\n");
+        out.push_str(&preservation);
     }
     Ok(out)
 }
@@ -496,40 +501,22 @@ pub fn diff_keymaps(before: &CurrentKeymaps, after: &CurrentKeymaps) -> Result<V
         before.model == after.model && before.serial == after.serial && before.mode == after.mode,
         "Cannot compare configurations for different devices or modes"
     );
-    ensure!(
-        after.modifiers.is_none() || before.modifiers.is_some(),
-        "Shortcut diff requires the current modifier maps"
-    );
     let mut changes = Vec::new();
     for (layer, old, new) in [
         ("Base", &before.base, &after.base),
         ("Fn", &before.fn_layer, &after.fn_layer),
     ] {
-        let old_modifiers = before.modifiers.as_ref().map(|m| {
-            if layer == "Base" {
-                &m.base
-            } else {
-                &m.fn_layer
-            }
-        });
-        // Legacy imports preserve the current modifier masks.
-        let new_modifiers = after
-            .modifiers
-            .as_ref()
-            .map(|m| {
-                if layer == "Base" {
-                    &m.base
-                } else {
-                    &m.fn_layer
-                }
-            })
-            .or(old_modifiers);
+        let (old_modifiers, new_modifiers) = if layer == "Base" {
+            (&before.modifiers.base, &after.modifiers.base)
+        } else {
+            (&before.modifiers.fn_layer, &after.modifiers.fn_layer)
+        };
         // Report physical changes in the same order as the visual document.
         for row in &ROWS {
             for (column, label) in row.labels.iter().enumerate() {
                 let index = row.first - column;
-                let old_mask = old_modifiers.map_or(0, |m| m.0[index]);
-                let new_mask = new_modifiers.map_or(0, |m| m.0[index]);
+                let old_mask = old_modifiers.0[index];
+                let new_mask = new_modifiers.0[index];
                 if old.0[index] != new.0[index] || old_mask != new_mask {
                     changes.push(format!(
                         "{layer}: physical {label} ({}): {} -> {}",
@@ -547,12 +534,10 @@ pub fn diff_keymaps(before: &CurrentKeymaps, after: &CurrentKeymaps) -> Result<V
                     old.0[index], new.0[index]
                 ));
             }
-            if let (Some(old), Some(new)) = (old_modifiers, new_modifiers)
-                && old.0[index] != new.0[index]
-            {
+            if old_modifiers.0[index] != new_modifiers.0[index] {
                 changes.push(format!(
                     "{layer}: preserved modifier byte {index}: raw:0x{:02X} -> raw:0x{:02X}",
-                    old.0[index], new.0[index]
+                    old_modifiers.0[index], new_modifiers.0[index]
                 ));
             }
         }
@@ -662,34 +647,17 @@ fn comment_notes(text: &str) -> Vec<&str> {
 }
 
 /// Align rows and regenerate physical labels while retaining user comments.
-/// Raw version 1 documents are upgraded to a complete row document.
 pub fn format_toml(text: &str) -> Result<String> {
     let raw = CurrentKeymaps::from_toml(text)?;
-    let document: toml::Value = toml::from_str(text)?;
-    if document["schema_version"].as_integer() == Some(1) {
-        // Keep notes when upgrading the old, structurally different schema.
-        let comments = comment_notes(text);
-        let prefix = if comments.is_empty() {
-            String::new()
-        } else {
-            format!("{}\n\n", comments.join("\n"))
-        };
-        return Ok(prefix + &to_toml(&raw)?);
-    }
     let spans: DocumentSpans = toml::from_str(text)?;
     let mut edits = Vec::new();
     for (layer_name, map, layer, modifiers) in [
-        (
-            "base",
-            &raw.base,
-            &spans.base,
-            raw.modifiers.as_ref().map(|m| &m.base),
-        ),
+        ("base", &raw.base, &spans.base, &raw.modifiers.base),
         (
             "fn",
             &raw.fn_layer,
             &spans.fn_layer,
-            raw.modifiers.as_ref().map(|m| &m.fn_layer),
+            &raw.modifiers.fn_layer,
         ),
     ] {
         let visual = VisualLayer::from_map(layer_name, map, modifiers);
@@ -755,7 +723,10 @@ mod tests {
             mode: 0,
             base: maps[0].clone(),
             fn_layer: maps[2].clone(),
-            modifiers: None,
+            modifiers: ModifierKeymaps {
+                base: maps[1].clone(),
+                fn_layer: maps[3].clone(),
+            },
         }
     }
 
@@ -766,7 +737,8 @@ mod tests {
             CurrentKeymaps::from_toml(include_str!("../../tests/fixtures/rows.toml")).unwrap(),
             raw
         );
-        let text = raw.to_visual_toml().unwrap();
+        let text = raw.to_toml().unwrap();
+        assert!(!text.contains("[preservation]"));
         let doc: VisualConfig = toml::from_str(&text).unwrap();
         assert_eq!(
             doc.base.number_row,
@@ -833,42 +805,25 @@ mod tests {
     }
 
     #[test]
-    fn reserved_fn_keys_cannot_be_remapped_in_rows_or_raw_arrays() {
+    fn reserved_fn_keys_cannot_be_remapped() {
         let raw = baseline();
         for (row, column, index, physical) in [
             ("q_row", 1, 44, "Q"),
             ("home_row", 0, 31, "Ctrl"),
             ("shift_row", 11, 7, "RShift"),
         ] {
-            for version in [2, 3] {
-                let mut config = raw.clone();
-                if version == 3 {
-                    config.modifiers = Some(ModifierKeymaps {
-                        base: Keymap([0; 128]),
-                        fn_layer: Keymap([0; 128]),
-                    });
-                }
-                let text = config.to_visual_toml().unwrap();
-                let mut document: toml::Value = toml::from_str(&text).unwrap();
-                document["fn"][row][column] = toml::Value::String("A".into());
-                let error = format!(
-                    "{:#}",
-                    CurrentKeymaps::from_toml(&toml::to_string(&document).unwrap()).unwrap_err()
-                );
-                assert!(error.contains(&format!("physical {physical}")), "{error}");
-                assert!(error.contains("Reserved"), "{error}");
-                if version == 3 {
-                    document["fn"][row][column] = toml::Value::String("Ctrl+(M)".into());
-                    assert!(
-                        CurrentKeymaps::from_toml(&toml::to_string(&document).unwrap()).is_err()
-                    );
-                }
-            }
+            let mut document: toml::Value = toml::from_str(&raw.to_toml().unwrap()).unwrap();
+            document["fn"][row][column] = toml::Value::String("A".into());
+            let error = format!(
+                "{:#}",
+                CurrentKeymaps::from_toml(&toml::to_string(&document).unwrap()).unwrap_err()
+            );
+            assert!(error.contains(&format!("physical {physical}")), "{error}");
+            assert!(error.contains("Reserved"), "{error}");
+            document["fn"][row][column] = toml::Value::String("Ctrl+(M)".into());
+            assert!(CurrentKeymaps::from_toml(&toml::to_string(&document).unwrap()).is_err());
             let mut modified = raw.clone();
             modified.fn_layer.0[index] = 4;
-            assert!(
-                CurrentKeymaps::from_toml(&toml::to_string_pretty(&modified).unwrap()).is_err()
-            );
             assert!(
                 modified
                     .validate()
@@ -877,14 +832,7 @@ mod tests {
                     .contains(physical)
             );
             let mut modified = raw.clone();
-            modified.modifiers = Some(ModifierKeymaps {
-                base: Keymap([0; 128]),
-                fn_layer: Keymap([0; 128]),
-            });
-            modified.modifiers.as_mut().unwrap().fn_layer.0[index] = 1;
-            assert!(
-                CurrentKeymaps::from_toml(&toml::to_string_pretty(&modified).unwrap()).is_err()
-            );
+            modified.modifiers.fn_layer.0[index] = 1;
             assert!(
                 modified
                     .validate()
@@ -898,18 +846,17 @@ mod tests {
     #[test]
     fn reserved_marker_is_only_accepted_at_fn_reserved_positions() {
         let raw = baseline();
-        let mut document: toml::Value = toml::from_str(&raw.to_visual_toml().unwrap()).unwrap();
+        let mut document: toml::Value = toml::from_str(&raw.to_toml().unwrap()).unwrap();
         document["base"]["q_row"][1] = toml::Value::String("Reserved".into());
         assert!(CurrentKeymaps::from_toml(&toml::to_string(&document).unwrap()).is_err());
         document["base"]["q_row"][1] = toml::Value::String("Q".into());
         document["fn"]["q_row"][1] = toml::Value::String("InvalidKey".into());
+        assert!(CurrentKeymaps::from_toml(&toml::to_string(&document).unwrap()).is_err());
+        document["fn"]["q_row"][1] = toml::Value::String("Reserved".into());
         assert_eq!(
             CurrentKeymaps::from_toml(&toml::to_string(&document).unwrap()).unwrap(),
             raw
         );
-        let formatted = format_toml(&toml::to_string(&document).unwrap()).unwrap();
-        assert!(formatted.contains("\"Reserved\""));
-        assert!(!formatted.contains("\"InvalidKey\""));
     }
 
     #[test]
@@ -928,7 +875,7 @@ mod tests {
                     255 - (i as u8).wrapping_add(offset)
                 }
             }));
-            let text = raw.to_visual_toml().unwrap();
+            let text = raw.to_toml().unwrap();
             assert_eq!(CurrentKeymaps::from_toml(&text).unwrap(), raw);
             assert_eq!(format_toml(&text).unwrap(), text);
         }
@@ -938,22 +885,50 @@ mod tests {
     }
 
     #[test]
-    fn shortcut_rows_export_format_diff_and_remove_modifiers() {
-        let mut before = baseline();
-        before.modifiers = Some(ModifierKeymaps {
+    fn sparse_preservation_records_only_nonzero_nonphysical_bytes() {
+        let mut raw = baseline();
+        raw.base.0[0] = 0xab;
+        raw.base.0[73] = 0x42;
+        raw.fn_layer.0[127] = 0xff;
+        raw.modifiers = ModifierKeymaps {
             base: Keymap([0; 128]),
             fn_layer: Keymap([0; 128]),
-        });
-        let mut doc: toml::Value = toml::from_str(&before.to_visual_toml().unwrap()).unwrap();
-        assert_eq!(doc["schema_version"].as_integer(), Some(3));
+        };
+        raw.modifiers.base.0[61] = 0x80;
+        let text = raw.to_toml().unwrap();
+        assert!(text.contains("base = { \"0\" = 0xAB, \"73\" = 0x42 }"));
+        assert!(text.contains("fn = { \"127\" = 0xFF }"));
+        assert!(text.contains("base_modifiers = { \"61\" = 0x80 }"));
+        assert!(!text.contains("fn_modifiers ="));
+        assert_eq!(CurrentKeymaps::from_toml(&text).unwrap(), raw);
+
+        let mut document: toml::Value = toml::from_str(&text).unwrap();
+        for (index, value) in [("60", 1), ("128", 1), ("73", 0)] {
+            document["preservation"]["base"] = toml::Value::Table(toml::map::Map::from_iter([(
+                index.into(),
+                toml::Value::Integer(value),
+            )]));
+            assert!(CurrentKeymaps::from_toml(&toml::to_string(&document).unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn shortcut_rows_export_format_diff_and_remove_modifiers() {
+        let mut before = baseline();
+        before.modifiers = ModifierKeymaps {
+            base: Keymap([0; 128]),
+            fn_layer: Keymap([0; 128]),
+        };
+        let mut doc: toml::Value = toml::from_str(&before.to_toml().unwrap()).unwrap();
+        assert_eq!(doc["schema_version"].as_integer(), Some(1));
         doc["base"]["home_row"][1] = toml::Value::String("Ctrl+Shift+C".into());
         doc["fn"]["q_row"][5] = toml::Value::String("RCtrl+RAlt+Delete".into());
         let text = toml::to_string(&doc).unwrap();
         let after = CurrentKeymaps::from_toml(&text).unwrap();
         assert_eq!(after.base.0[30], 0x06);
-        assert_eq!(after.modifiers.as_ref().unwrap().base.0[30], 0x03);
+        assert_eq!(after.modifiers.base.0[30], 0x03);
         assert_eq!(after.fn_layer.0[40], 0x4c);
-        assert_eq!(after.modifiers.as_ref().unwrap().fn_layer.0[40], 0x50);
+        assert_eq!(after.modifiers.fn_layer.0[40], 0x50);
         assert_eq!(
             diff_keymaps(&before, &after).unwrap(),
             [
@@ -970,7 +945,7 @@ mod tests {
         );
         doc["base"]["home_row"][1] = toml::Value::String("C".into());
         let removed = CurrentKeymaps::from_toml(&toml::to_string(&doc).unwrap()).unwrap();
-        assert_eq!(removed.modifiers.as_ref().unwrap().base.0[30], 0);
+        assert_eq!(removed.modifiers.base.0[30], 0);
         assert_eq!(
             diff_keymaps(&after, &removed).unwrap(),
             ["Base: physical A (home_row): LCtrl+LShift+C -> C",]
@@ -980,7 +955,7 @@ mod tests {
     #[test]
     fn shortcut_documents_preserve_all_four_maps_and_validate_metadata() {
         let mut raw = baseline();
-        raw.modifiers = Some(ModifierKeymaps {
+        raw.modifiers = ModifierKeymaps {
             base: Keymap(std::array::from_fn(|i| i as u8)),
             fn_layer: Keymap(std::array::from_fn(|i| {
                 if FN_RESERVED.iter().any(|(reserved, _)| *reserved == i) {
@@ -989,21 +964,25 @@ mod tests {
                     255 - i as u8
                 }
             })),
-        });
-        let text = raw.to_visual_toml().unwrap();
+        };
+        let text = raw.to_toml().unwrap();
         assert_eq!(CurrentKeymaps::from_toml(&text).unwrap(), raw);
         assert_eq!(format_toml(&text).unwrap(), text);
         let document: toml::Value = toml::from_str(&text).unwrap();
         for field in ["base_modifiers", "fn_modifiers"] {
             let mut bad = document.clone();
             bad["preservation"].as_table_mut().unwrap().remove(field);
-            assert!(CurrentKeymaps::from_toml(&toml::to_string(&bad).unwrap()).is_err());
+            let parsed = CurrentKeymaps::from_toml(&toml::to_string(&bad).unwrap()).unwrap();
+            assert_ne!(parsed, raw);
             let mut bad = document.clone();
-            bad["preservation"][field].as_array_mut().unwrap().pop();
+            bad["preservation"][field]
+                .as_table_mut()
+                .unwrap()
+                .insert("32".into(), toml::Value::Integer(1));
             assert!(CurrentKeymaps::from_toml(&toml::to_string(&bad).unwrap()).is_err());
         }
         assert!(
-            CurrentKeymaps::from_toml(&text.replace("schema_version = 3", "schema_version = 2"))
+            CurrentKeymaps::from_toml(&text.replace("schema_version = 1", "schema_version = 2"))
                 .is_err()
         );
         let mut bad = document;
@@ -1099,14 +1078,14 @@ mod tests {
 
     #[test]
     fn row_errors_identify_layer_and_physical_position_before_writing() {
-        let mut doc: toml::Value = toml::from_str(&baseline().to_visual_toml().unwrap()).unwrap();
+        let mut doc: toml::Value = toml::from_str(&baseline().to_toml().unwrap()).unwrap();
         doc["base"]["home_row"].as_array_mut().unwrap().pop();
         let error = CurrentKeymaps::from_toml(&toml::to_string(&doc).unwrap())
             .unwrap_err()
             .to_string();
         assert!(error.contains("base.home_row needs 13 entries; found 12"));
         assert!(error.contains("Ctrl, A, S, D"));
-        let mut doc: toml::Value = toml::from_str(&baseline().to_visual_toml().unwrap()).unwrap();
+        let mut doc: toml::Value = toml::from_str(&baseline().to_toml().unwrap()).unwrap();
         doc["fn"]["q_row"][5] = toml::Value::String("Typo".into());
         let error = format!(
             "{:#}",
@@ -1116,9 +1095,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_rows_layers_preservation_and_unsupported_layouts() {
-        let good: toml::Value = toml::from_str(&baseline().to_visual_toml().unwrap()).unwrap();
-        for field in ["base", "fn", "preservation"] {
+    fn rejects_missing_rows_layers_and_unsupported_layouts() {
+        let good: toml::Value = toml::from_str(&baseline().to_toml().unwrap()).unwrap();
+        assert!(CurrentKeymaps::from_toml(&toml::to_string(&baseline()).unwrap()).is_err());
+        for field in ["base", "fn"] {
             let mut doc = good.clone();
             doc.as_table_mut().unwrap().remove(field);
             assert!(CurrentKeymaps::from_toml(&toml::to_string(&doc).unwrap()).is_err());
@@ -1132,18 +1112,22 @@ mod tests {
             ("layout", toml::Value::String("jis".into())),
             ("model", toml::Value::String("PD-KB820".into())),
             ("mode", toml::Value::Integer(1)),
-            ("schema_version", toml::Value::Integer(3)),
+            ("schema_version", toml::Value::Integer(4)),
         ] {
             let mut doc = good.clone();
             doc[field] = value;
             assert!(CurrentKeymaps::from_toml(&toml::to_string(&doc).unwrap()).is_err());
         }
         for value in [
+            toml::Value::Array(vec![toml::Value::Integer(0); 68]),
             toml::Value::Array(vec![toml::Value::Integer(0); 67]),
             toml::Value::Array(vec![toml::Value::Integer(256); 68]),
         ] {
             let mut doc = good.clone();
-            doc["preservation"]["base"] = value;
+            doc.as_table_mut().unwrap().insert(
+                "preservation".into(),
+                toml::Value::Table(toml::map::Map::from_iter([("base".into(), value)])),
+            );
             assert!(CurrentKeymaps::from_toml(&toml::to_string(&doc).unwrap()).is_err());
         }
     }
@@ -1151,7 +1135,7 @@ mod tests {
     #[test]
     fn independent_row_edits_and_diff_cover_all_preserved_bytes() {
         let raw = baseline();
-        let mut doc: toml::Value = toml::from_str(&raw.to_visual_toml().unwrap()).unwrap();
+        let mut doc: toml::Value = toml::from_str(&raw.to_toml().unwrap()).unwrap();
         doc["base"]["q_row"][5] = toml::Value::String("Y".into());
         let edited = CurrentKeymaps::from_toml(&toml::to_string(&doc).unwrap()).unwrap();
         assert_eq!(edited.fn_layer, raw.fn_layer);
@@ -1182,7 +1166,7 @@ mod tests {
     #[test]
     fn formatting_keeps_comments_and_condenses_multiline_rows() {
         let raw = baseline();
-        let text = raw.to_visual_toml().unwrap();
+        let text = raw.to_toml().unwrap();
         let start = text.find("home_row = [").unwrap();
         let end = start + text[start..].find(']').unwrap() + 1;
         let messy = format!(
