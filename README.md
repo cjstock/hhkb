@@ -2,15 +2,15 @@
 
 An unofficial key remapping tool and library for the **Happy Hacking Keyboard (HHKB) Professional Hybrid** on Linux, written in Rust.
 
-This tool communicates directly with the keyboard over its USB HID programming interface (using the `hidapi` crate) to read keyboard information and DIP switches, and export/import raw base and Fn maps without the official Windows/macOS keymap tool.
+This tool communicates directly with the keyboard over its USB HID programming interface (using the `hidapi` crate) to read keyboard information and DIP switches, and export/import base and Fn assignments, including shortcuts, without the official Windows/macOS keymap tool.
 
 ## Features
 
 - **Read Keyboard Info**: Retrieve HHKB serial number, firmware versions, type number, and currently running firmware.
 - **Query DIP Switches**: Read the hardware DIP switch states.
-- **Editable keyboard rows**: Export/import aligned base and Fn rows with friendly action names, physical labels, and lossless raw escapes.
+- **Editable keyboard rows**: Export/import aligned base and Fn rows with friendly action names, shortcuts, physical labels, and lossless raw escapes.
 - **Preview and format**: Show intended changes with `hhkb diff` and align rows with `hhkb format`.
-- **Preservation and verification**: Preserve both companion maps and sleep time, save an import backup, and verify a fresh readback.
+- **Preservation and verification**: Preserve all four maps and sleep time, save an import backup, and verify a fresh readback.
 - US-layout PD-KB800 models in mode `0` are supported; additional modes/layouts remain unverified.
 
 ## Prerequisites
@@ -78,7 +78,7 @@ You can supply a different export path: `hhkb export original.toml`. Export
 refuses to overwrite existing files. From the source tree, prefix commands with
 `cargo run --`, for example `cargo run -- export`.
 
-Exports now use schema version 2, with five complete rows in both `[base]` and
+Exports use schema version 3, with five complete rows in both `[base]` and
 `[fn]`. Each physical row stays on one line. Comments above the arrays label
 physical key positions; array strings are their assigned actions. For example:
 
@@ -88,16 +88,38 @@ physical key positions; array strings are their assigned actions. For example:
 home_row = ["LCtrl", "B", "S", "D", "F", "G", "H", "J", "K", "L", ";", "'", "Enter"]
 ```
 
-Here the physical A key produces B. Friendly actions include letters, digits,
-punctuation, navigation, modifiers, and F1–F24. Names are case-insensitive;
-`Esc` and `Ctrl` are accepted aliases for `Escape` and `LCtrl`. Unknown and zero
-values use explicit escapes such as `"raw:0xE8"` and `"raw:0x00"`. Vendor-specific
-media and shortcut values retain raw names until their meanings are validated.
+Here the physical A key produces B. Replacing `"B"` with `"Ctrl+Shift+B"`
+assigns a shortcut at physical A. Friendly actions cover every single-key
+code in the official Windows Professional Keymap Tool 2.0.1, including
+`VolumeDown`, `VolumeUp`, `Mute`, `Eject`, `BrightnessUp`, `BrightnessDown`,
+`Power`, `Stop`, keypad keys, F1–F24, and Japanese input keys. Names are
+case-insensitive; official labels such as `"Volume Up"` also work. `Esc` and
+`Ctrl` are aliases for `Escape` and `LCtrl`. Zero normally exports as
+`InvalidKey`, matching the official tool's label. Unknown bytes retain lossless escapes such
+as `"raw:0xAB"`; existing raw escapes still import. See the
+[action catalog](docs/actions.md) for names, aliases, and source evidence.
+
+To assign a shortcut, write modifiers before one key, for example
+`"Ctrl+Shift+C"`, `"RCtrl+RAlt+Delete"`, or `"LMeta+T"`. Left and right
+modifiers are distinct. Modifier-only shortcuts such as `"Ctrl+Shift"`
+or `"Ctrl+(M)"` also work. Export and format use explicit canonical names such as
+`"LCtrl+LShift+C"`. A plain name like `"C"` clears that key's shortcut
+modifiers. The official tool allows any number of modifiers and one ordinary
+key per shortcut. `Fn` is not a shortcut modifier. See
+[shortcut details](docs/row-format.md#shortcuts).
+
+Newer actions and shortcut edits require compatible firmware. This tool checks
+for running HYBRID application firmware A0.48 or later before editing shortcut
+masks.
 
 Both layers are complete and independent: changing base does not change Fn.
+On the Fn layer, physical Q, Ctrl, and RShift export as `Reserved`; their key
+and shortcut modifier bytes must remain zero. Import rejects assignments to
+those positions in both row and raw files. Older `InvalidKey` entries at those
+positions still load and are canonicalized to `Reserved` by `hhkb format`.
 Exact row lengths are required, and errors identify the layer, row, and
 physical position. The `[preservation]` section retains bytes without physical
-key labels, including nonzero values. Keep this section when editing.
+key labels from all four maps, including nonzero values. Keep this section when editing.
 
 `hhkb diff [path]` defaults to `hhkb.toml`, checks device identity, and reports
 physical assignments and preservation bytes that would change. It performs
@@ -110,23 +132,28 @@ legacy raw files to rows, retaining their comments above the new document.
 
 The row layout currently supports US-layout PD-KB800 models in mode `0`.
 Export device model, serial, layout, and mode identify the target keyboard.
-Existing version 1 raw exports still import; `hhkb export --raw original.toml`
-creates that format. To upgrade an existing raw `hhkb.toml`, run `hhkb format`.
-See the [complete sanitized example](tests/fixtures/rows.toml) and
-[row-format details](docs/row-format.md).
+Legacy version 1 raw and version 2 row files still import. When they omit
+modifier maps, import preserves the device's current modifiers. Run
+`hhkb export` to create a fresh version 3 file before adding shortcuts.
+`hhkb export --raw original.toml` writes version 1 arrays including modifier
+maps; formatting that file produces version 3 rows. The
+[complete sanitized example](tests/fixtures/rows.toml) shows the older version
+2 layout. See [row-format details](docs/row-format.md).
 
 Import validates the schema, rows/actions, mode, and connected device identity
 before writing. It saves the current raw configuration beside the input as
 `<filename>.backup-<Unix timestamp in nanoseconds>.toml` and aborts if that save
 fails. It takes a fresh preservation snapshot, writes the requested layers
-alongside the unchanged companion maps and sleep time, and verifies all four
-maps, mode, and sleep time in a fresh read session. A failed write or readback
-is an error; configuration writes are not retried and no rollback is claimed.
+alongside the requested modifier maps and unchanged sleep time, and verifies
+all four maps, mode, and sleep time in a fresh read session. A failed write or
+readback is an error; configuration writes are not retried and no rollback is
+claimed.
 
 The library's `read_current_keymaps()` and `write_current_keymaps()` retain
-128-byte maps. `CurrentKeymaps::from_toml()` reads either schema;
-`to_visual_toml()` produces rows and `to_toml()` produces raw version 1 arrays.
-`read_snapshot()` also exposes companion maps and sleep time.
+128-byte maps. `CurrentKeymaps::from_toml()` reads raw version 1 and row
+versions 2/3; `to_visual_toml()` produces rows and `to_toml()` produces raw
+version 1 arrays, including modifier maps when present. `read_snapshot()`
+exposes all four maps and sleep time.
 See [verified protocol behavior](docs/protocol.md) and
 [hardware acceptance](docs/hardware-acceptance.md). The experimental legacy
 named-key structs are retained but are not used by this workflow.

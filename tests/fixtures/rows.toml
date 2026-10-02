@@ -21,12 +21,12 @@ bottom_row = ["LAlt", "Fn",     "Space", "RMeta",  "RAlt"]
 [fn]
 # keys:        Esc       1     2     3     4     5     6     7     8     9     0      -      =      \         `
 number_row = ["Escape", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12", "Insert", "Delete"]
-# keys:   Tab         Q           W         E     R           T    Y    U    I    O    P              [           ]           Delete
-q_row = ["CapsLock", "raw:0x00", "PageUp", "Up", "PageDown", "T", "Y", "7", "8", "9", "PrintScreen", "raw:0xEC", "raw:0xED", "Backspace"]
-# keys:      Ctrl        A       S       D       F        G      H    J    K    L    ;           '           Enter
-home_row = ["raw:0x00", "Home", "Left", "Down", "Right", "End", "=", "4", "5", "6", "raw:0xE8", "raw:0xE9", "Enter"]
-# keys:       LShift    Z    X    C    V    B    N    M    ,    .    /           RShift      Fn
-shift_row = ["LShift", "Z", "X", "C", "V", "B", "-", "1", "2", "3", "raw:0xEA", "raw:0x00", "Fn"]
+# keys:   Tab         Q           W         E     R           T    Y    U    I    O    P              [               ]                 Delete
+q_row = ["CapsLock", "Reserved", "PageUp", "Up", "PageDown", "T", "Y", "7", "8", "9", "PrintScreen", "BrightnessUp", "BrightnessDown", "Backspace"]
+# keys:      Ctrl        A       S       D       F        G      H    J    K    L    ;             '           Enter
+home_row = ["Reserved", "Home", "Left", "Down", "Right", "End", "=", "4", "5", "6", "VolumeDown", "VolumeUp", "Enter"]
+# keys:       LShift    Z    X    C    V    B    N    M    ,    .    /       RShift      Fn
+shift_row = ["LShift", "Z", "X", "C", "V", "B", "-", "1", "2", "3", "Mute", "Reserved", "Fn"]
 # keys:        LAlt    LDiamond  Space  RDiamond  RAlt
 bottom_row = ["LAlt", "LMeta",  "0",   "RMeta",  "RAlt"]
 

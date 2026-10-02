@@ -1,4 +1,4 @@
-# Row format (schema version 2)
+# Row format (schema versions 2 and 3)
 
 [The complete example](../tests/fixtures/rows.toml) contains sanitized device
 identity and the captured baseline assignments. Rows always describe physical
@@ -30,34 +30,76 @@ Layout reference: [PFU HYBRID US-layout manual](https://origin.pfultd.com/downlo
 Ordinary action names follow the Keyboard/Keypad page in the
 [USB-IF HID Usage Tables](https://www.usb.org/sites/default/files/hut1_3_0.pdf).
 The observed HHKB Fn token `01` is treated separately from standard keyboard
-usages. Vendor-specific values are not inferred from their numeric similarity
-to consumer-page or keyboard-page codes.
+usages. HHKB-specific assignments are verified from the official Windows tool; see
+[the action catalog and provenance](actions.md). They are not inferred from
+numeric similarity to consumer-page or keyboard-page codes.
 
 ## Lossless translation
 
-Version 2 requires `layout = "hhkb-us"`, a supported PD-KB800 model identity,
+Versions 2 and 3 require `layout = "hhkb-us"`, a supported PD-KB800 model identity,
 mode 0, every row of both layers, and the preservation section. Unknown fields,
 missing rows, bad row lengths, invalid actions, unsupported layouts, and wrong
 byte values are errors before the device is opened for import or diff.
 
-The raw library configuration remains version 1. Loading a visual document
-resolves each action to one byte, puts it at the corresponding fixed position,
-and restores all nonphysical bytes. Saving reverses this process. There are
+The raw library configuration remains version 1, with optional modifier maps.
+Loading a visual document resolves each action to a key byte and, for version
+3, a modifier byte at the same fixed position, then restores all nonphysical
+bytes. Saving reverses this process. There are
 no substitutions for zeros or omitted positions and no base/Fn coupling.
 
 `[preservation].base` and `[preservation].fn` each contain exactly 68 bytes:
 index 0 followed by indices 61 through 127. All are preserved literally. These
-arrays represent only the nonphysical bytes of the two exposed maps; the
-companion selector maps are independently preserved from the device's fresh
-snapshot by the unchanged protocol write implementation.
+arrays represent the nonphysical bytes of the two key maps. Version 3 also
+requires `[preservation].base_modifiers` and `fn_modifiers`, each with 68 bytes
+for the same indices. These preserve the nonphysical bytes of the modifier maps.
+Version 2 files omit modifier data entirely; imports preserve the device's
+current modifier maps. Version 3 files include modifier masks for every physical
+key as well as the nonphysical preservation bytes.
 
-Canonical names cover A–Z, 0–9, unshifted punctuation, F1–F24, navigation,
-modifiers, common keypad actions, and the observed Fn token. The modifier
+Canonical names cover every individual action code in the official Windows
+Professional tool 2.0.1. See [the full action catalog](actions.md). The modifier
 names distinguish left/right: `LCtrl`, `RCtrl`, `LShift`, `RShift`, `LAlt`,
-`RAlt`, `LMeta`, `RMeta`. Unknown values and zeroes serialize as `raw:0xNN`;
-raw escapes require exactly two hex digits and work for every byte value.
-No `None`, `Default`, or inheritance token is introduced. Vendor-specific media,
-brightness, and shortcut meanings remain unverified, so they keep raw names.
+`RAlt`, `LMeta`, `RMeta`. Zero normally serializes as `InvalidKey` (the official label),
+which stores a literal zero and does not introduce inheritance. Unknown values
+serialize as `raw:0xNN`; raw escapes require exactly two hex digits and still
+work for every byte value, including named codes. Friendly labels accept
+spaces and underscores as well as case differences.
+
+## Shortcuts
+
+A version 3 row entry can be a plain key or a shortcut. Write modifiers before
+one key, separated by `+`: `"Ctrl+Shift+C"`, `"RCtrl+RAlt+Delete"`, or
+`"LMeta+T"`. `Ctrl`, `Shift`, `Alt`, `Win`, and `Command` default to the left
+side; `L`/`R` prefixes choose a side explicitly. Up to all eight modifier bits
+can be combined with one ordinary key. A modifier-only shortcut such as
+`"Ctrl+Shift"` or `"Ctrl+(M)"` stores key byte `00` with the selected
+modifier bits, matching the official tool's `(M)` shortcut action. `Fn` is a
+separate keyboard action and cannot be combined with modifiers in friendly
+syntax. Standalone `"LCtrl"` remains an ordinary key assignment.
+
+Canonical export and format use explicit names in bit order, for example
+`"LCtrl+LShift+C"`. Modifier-only shortcuts export as `"LCtrl+(M)"`
+or `"LCtrl+LShift+(M)"`. Replacing that string with `"C"` clears the modifier
+mask at that physical key. The key byte and mask are read, written, and checked
+at the same index in the base or Fn pair of maps. The modifier bits are `01`
+LCtrl, `02` LShift, `04` LAlt, `08` LMeta, `10` RCtrl, `20` RShift, `40`
+RAlt, and `80` RMeta. Unknown combinations retain a lossless
+`"raw:0xNN/0xMM"` pair when friendly syntax would be ambiguous.
+
+Legacy raw version 1 and row version 2 imports without modifier maps preserve
+the device's current modifier maps. Export a fresh version 3 document before
+adding shortcuts. A raw version 1 export with `[modifiers]` arrays can also
+edit them and formats to version 3. Import checks the connected firmware
+before any write if modifier bytes change; the verified minimum is running
+HYBRID application firmware A0.48.
+
+On the Fn layer, physical Q (`q_row[1]`, byte 44), Ctrl (`home_row[0]`, byte
+31), and RShift (`shift_row[11]`, byte 7) are reserved. Exports show
+`"Reserved"` at those positions. Both the key byte and shortcut modifier
+byte must be zero; row and raw imports reject changes to either byte before
+writing. `"Reserved"` is rejected at every other position. Older row files
+with `"InvalidKey"` or `"raw:0x00"` at these three positions still load when
+their bytes are zero, and `hhkb format` changes the labels to `"Reserved"`.
 
 ## Formatting and previews
 
@@ -65,13 +107,15 @@ brightness, and shortcut meanings remain unverified, so they keep raw names.
 aliases, aligns action columns with generated `# keys:` label comments, and
 keeps each physical row on a single line. It retains other comments and moves
 notes inside multiline arrays above their row. Formatting a version 1 raw
-file creates version 2 and keeps its comment notes above the generated file.
+file creates version 3 when modifier maps are present, or version 2 for a
+legacy raw file without them. It keeps comment notes above the generated file.
 A temporary file beside the original is synced and renamed over it only after
 formatting succeeds; original permissions and symlink targets are retained.
 
 `hhkb diff` compares a validated file against a fresh current keyboard snapshot.
-It reports physical keys by layer/row and also reports every changed
-preservation byte. It never sends sleep-setting, map-write, or commit commands.
+It reports physical keys and shortcut masks by layer/row, and every changed
+nonphysical key or modifier byte. It never sends sleep-setting, map-write, or
+commit commands.
 The old raw file format remains accepted by import and diff, and raw exports
 are available through `hhkb export --raw`.
 

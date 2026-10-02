@@ -32,9 +32,9 @@ The four selector pairs, in captured order, are:
 | Selectors | API use |
 | --- | --- |
 | `00/00` | Mode 0 base map |
-| `10/00` | Preserved companion map |
+| `10/00` | Mode 0 base shortcut modifier map |
 | `00/01` | Mode 0 Fn map |
-| `10/01` | Preserved companion map |
+| `10/01` | Mode 0 Fn shortcut modifier map |
 
 A complete fresh read session precedes a write session. The write exchange
 sends `01 02 05 06 08`, twelve `86` reports (three per map in the same selector
@@ -44,10 +44,18 @@ the implementation pauses one second after its reply. Each `86` payload begins
 with block ID and length, followed by chunks of **two selectors plus 128 map
 bytes**. Its block IDs are `41 82 c3`; lengths are `59 59 12` (decimal).
 Command `07` sends `00 01 <mode>`; only the captured mode value zero is used.
-The full meanings of `04`, `07`, and the `10` selectors remain unverified.
+The full meanings of `04` and `07` remain unverified. The `10` selector
+meaning was established from the official Windows tool 2.0.1 assembly:
+`RequestKeymap` stores `(modifier_mask * 256) + key_byte`, with modifier bits
+for left/right Control, Shift, Alt, and GUI. `SetKeymapShortCutPart` writes the
+high byte to the `10` selector, while `SetKeymap` writes the low byte to `00`.
+The [installer provenance](actions.md#evidence-and-validation) records the
+source. The Linux write path already sends all four maps in this order.
 
-Only the requested base and Fn arrays replace the snapshot arrays. All bytes,
-including zeroes, are treated literally. Captured Ctrl/Escape swapping changed
+Requested base and Fn key arrays replace the snapshot key arrays. Modifier
+arrays replace the snapshot modifier arrays only when supplied; older files
+preserve the snapshot modifier arrays. All bytes, including zeroes, are treated
+literally. Captured Ctrl/Escape swapping changed
 base indices 31 and 60 **and** Fn index 60. Restoring only the base left the Fn
 change behind; manually restoring Fn completed the original configuration.
 This implementation does not reproduce that automatic coupling or infer a
