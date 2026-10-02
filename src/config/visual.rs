@@ -2,7 +2,9 @@
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
-use super::{CurrentKeymaps, Keymap};
+use super::{
+    CurrentKeymaps, FN_RESERVED, Keymap, ModifierKeymaps, assignment_name, parse_assignment,
+};
 
 struct Row {
     name: &'static str,
@@ -48,10 +50,13 @@ const ROWS: [Row; 5] = [
     },
 ];
 
-// Standard Keyboard/Keypad-page usages; HHKB's observed Fn token is 01.
-// Vendor-specific media/shortcut values are intentionally left as raw bytes.
+// Byte assignments verified against HHKB Professional Keymap Tool 2.0.1.
+// See docs/actions.md for provenance and mode-dependent names.
+// HHKB Fn and media tokens are not standard HID keyboard-page usages.
 const ACTIONS: &[(u8, &str)] = &[
+    (0x00, "InvalidKey"),
     (0x01, "Fn"),
+    (0x02, "Fn2"),
     (0x28, "Enter"),
     (0x29, "Escape"),
     (0x2a, "Backspace"),
@@ -62,6 +67,7 @@ const ACTIONS: &[(u8, &str)] = &[
     (0x2f, "["),
     (0x30, "]"),
     (0x31, "\\"),
+    (0x32, "NonUSHash"),
     (0x33, ";"),
     (0x34, "'"),
     (0x35, "`"),
@@ -89,7 +95,17 @@ const ACTIONS: &[(u8, &str)] = &[
     (0x57, "KeypadAdd"),
     (0x58, "KeypadEnter"),
     (0x63, "KeypadDecimal"),
+    (0x64, "NonUSBackslash"),
     (0x65, "Menu"),
+    (0x66, "Power"),
+    (0x78, "Stop"),
+    (0x87, "Ro"),
+    (0x88, "Kana"),
+    (0x89, "Yen"),
+    (0x8a, "Henkan"),
+    (0x8b, "Muhenkan"),
+    (0x90, "MacKana"),
+    (0x91, "MacEisu"),
     (0xe0, "LCtrl"),
     (0xe1, "LShift"),
     (0xe2, "LAlt"),
@@ -98,6 +114,12 @@ const ACTIONS: &[(u8, &str)] = &[
     (0xe5, "RShift"),
     (0xe6, "RAlt"),
     (0xe7, "RMeta"),
+    (0xe8, "VolumeDown"),
+    (0xe9, "VolumeUp"),
+    (0xea, "Mute"),
+    (0xeb, "Eject"),
+    (0xec, "BrightnessUp"),
+    (0xed, "BrightnessDown"),
 ];
 
 pub fn action_name(byte: u8) -> String {
@@ -126,17 +148,42 @@ pub fn action_byte(name: &str) -> Result<u8> {
         );
         return Ok(u8::from_str_radix(hex, 16)?);
     }
+    let normalized = normalized.replace([' ', '_'], "");
     let canonical = match normalized.as_str() {
+        "function" => "fn",
+        "function2" | "leftfn" => "fn2",
+        "invalid" => "invalidkey",
+        "application" | "applicationkey" => "menu",
+        "volumedn" | "voldown" => "volumedown",
+        "volup" => "volumeup",
+        "volumemute" => "mute",
+        "brightnessdn" => "brightnessdown",
+        "pause/break" | "break" => "pause",
+        "clear/numlock" | "clear" => "numlock",
+        "keypad/" => "keypaddivide",
+        "keypad*" => "keypadmultiply",
+        "keypad-" => "keypadsubtract",
+        "keypad+" => "keypadadd",
+        "keypad." => "keypaddecimal",
+        "international1" => "ro",
+        "international2" => "kana",
+        "international3" => "yen",
+        "international4" | "convert" | "rdiamond" | "rightdiamond" => "henkan",
+        "international5" | "nonconvert" | "ldiamond" | "leftdiamond" => "muhenkan",
+        "lang1" | "kanamac" => "mackana",
+        "lang2" | "eisu" | "alphanumericcharacters(mac)" => "maceisu",
         "esc" => "escape",
         "return" => "enter",
         "ctrl" | "control" | "leftctrl" | "leftcontrol" => "lctrl",
         "rightctrl" | "rightcontrol" => "rctrl",
-        "leftshift" => "lshift",
+        "shift" | "leftshift" => "lshift",
         "rightshift" => "rshift",
-        "leftalt" => "lalt",
+        "alt" | "opt" | "leftalt" => "lalt",
         "rightalt" => "ralt",
-        "leftmeta" | "leftgui" | "lsuper" | "lwin" | "lcommand" => "lmeta",
-        "rightmeta" | "rightgui" | "rsuper" | "rwin" | "rcommand" => "rmeta",
+        "meta" | "gui" | "super" | "win" | "command" | "leftmeta" | "leftgui" | "lsuper"
+        | "leftsuper" | "lwin" | "leftwin" | "lcommand" | "leftcommand" => "lmeta",
+        "rightmeta" | "rightgui" | "rsuper" | "rightsuper" | "rwin" | "rightwin" | "rcommand"
+        | "rightcommand" => "rmeta",
         "pgup" => "pageup",
         "pgdn" => "pagedown",
         "backslash" => "\\",
@@ -152,11 +199,41 @@ pub fn action_byte(name: &str) -> Result<u8> {
         "slash" => "/",
         _ => normalized.as_str(),
     };
-    for byte in 0..=255 {
-        let exported = action_name(byte);
-        if !exported.starts_with("raw:") && exported.eq_ignore_ascii_case(canonical) {
-            return Ok(byte);
+    if let Some((byte, _)) = ACTIONS
+        .iter()
+        .find(|(_, name)| name.eq_ignore_ascii_case(canonical))
+    {
+        return Ok(*byte);
+    }
+    if canonical.len() == 1 {
+        match canonical.as_bytes()[0] {
+            b'a'..=b'z' => return Ok(canonical.as_bytes()[0] - b'a' + 4),
+            b'1'..=b'9' => return Ok(canonical.as_bytes()[0] - b'1' + 0x1e),
+            b'0' => return Ok(0x27),
+            _ => {}
         }
+    }
+    if let Some(number) = canonical
+        .strip_prefix('f')
+        .and_then(|n| n.parse::<u8>().ok())
+        && (1..=24).contains(&number)
+        && canonical == format!("f{number}")
+    {
+        return Ok(if number <= 12 {
+            0x3a + number - 1
+        } else {
+            0x68 + number - 13
+        });
+    }
+    if let Some(digit) = canonical.strip_prefix("keypad")
+        && digit.len() == 1
+        && digit.as_bytes()[0].is_ascii_digit()
+    {
+        return Ok(if digit == "0" {
+            0x62
+        } else {
+            0x59 + digit.as_bytes()[0] - b'1'
+        });
     }
     bail!(
         "Unknown action {name:?}; use a key name such as A, Escape, Home, LCtrl, or an explicit raw:0xAB value"
@@ -182,10 +259,17 @@ impl VisualLayer {
             &self.bottom_row,
         ]
     }
-    fn from_map(map: &Keymap) -> Self {
+    fn from_map(layer: &str, map: &Keymap, modifiers: Option<&Keymap>) -> Self {
         let mut rows = ROWS.iter().map(|row| {
             (0..row.labels.len())
-                .map(|column| action_name(map.0[row.first - column]))
+                .map(|column| {
+                    let index = row.first - column;
+                    if layer == "fn" && FN_RESERVED.iter().any(|(reserved, _)| *reserved == index) {
+                        "Reserved".into()
+                    } else {
+                        assignment_name(map.0[index], modifiers.map_or(0, |m| m.0[index]))
+                    }
+                })
                 .collect()
         });
         Self {
@@ -196,12 +280,30 @@ impl VisualLayer {
             bottom_row: rows.next().unwrap(),
         }
     }
-    fn apply(&self, layer: &str, preserved: Vec<u8>) -> Result<Keymap> {
+    fn apply(
+        &self,
+        layer: &str,
+        preserved: Vec<u8>,
+        preserved_modifiers: Option<Vec<u8>>,
+    ) -> Result<(Keymap, Option<Keymap>)> {
         ensure!(
             preserved.len() == 68,
             "preservation.{layer} needs 68 bytes (index 0, then 61..127); found {}",
             preserved.len()
         );
+        let mut modifiers = if let Some(bytes) = preserved_modifiers {
+            ensure!(
+                bytes.len() == 68,
+                "preservation.{layer}_modifiers needs 68 bytes; found {}",
+                bytes.len()
+            );
+            let mut map = [0; 128];
+            map[0] = bytes[0];
+            map[61..].copy_from_slice(&bytes[1..]);
+            Some(Keymap(map))
+        } else {
+            None
+        };
         let mut map = [0; 128];
         map[0] = preserved[0];
         map[61..].copy_from_slice(&preserved[1..]);
@@ -215,7 +317,27 @@ impl VisualLayer {
                 row.labels.join(", ")
             );
             for (column, action) in actions.iter().enumerate() {
-                map[row.first - column] = action_byte(action).with_context(|| {
+                let index = row.first - column;
+                let reserved = layer == "fn" && FN_RESERVED.iter().any(|(i, _)| *i == index);
+                if action.eq_ignore_ascii_case("Reserved") {
+                    ensure!(
+                        reserved,
+                        "{layer}.{}, position {} (physical {}): Reserved is only valid at Fn Q, Ctrl, or RShift",
+                        row.name,
+                        column + 1,
+                        row.labels[column]
+                    );
+                    map[index] = 0;
+                    continue;
+                }
+                let assignment = if modifiers.is_some() {
+                    parse_assignment(action)
+                } else {
+                    action_byte(action).map(|key| (key, 0)).context(
+                        "Legacy rows do not include modifier data; export a schema version 3 file to edit shortcuts"
+                    )
+                };
+                let (key, mask) = assignment.with_context(|| {
                     format!(
                         "{layer}.{}, position {} (physical {})",
                         row.name,
@@ -223,9 +345,20 @@ impl VisualLayer {
                         row.labels[column]
                     )
                 })?;
+                ensure!(
+                    !reserved || (key == 0 && mask == 0),
+                    "{layer}.{}, position {} (physical {}): Reserved key cannot be remapped",
+                    row.name,
+                    column + 1,
+                    row.labels[column]
+                );
+                map[index] = key;
+                if let Some(modifiers) = &mut modifiers {
+                    modifiers.0[index] = mask;
+                }
             }
         }
-        Ok(Keymap(map))
+        Ok((Keymap(map), modifiers))
     }
 }
 
@@ -235,6 +368,10 @@ struct Preservation {
     base: Vec<u8>,
     #[serde(rename = "fn")]
     fn_layer: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base_modifiers: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fn_modifiers: Option<Vec<u8>>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -265,18 +402,39 @@ fn validate_layout(model: &str, layout: &str) -> Result<()> {
 pub(super) fn from_toml(text: &str) -> Result<CurrentKeymaps> {
     let config: VisualConfig = toml::from_str(text)?;
     ensure!(
-        config.schema_version == 2,
+        matches!(config.schema_version, 2 | 3),
         "Unsupported visual schema version {}",
         config.schema_version
     );
     validate_layout(&config.model, &config.layout)?;
+    ensure!(
+        (config.schema_version == 3)
+            == (config.preservation.base_modifiers.is_some()
+                && config.preservation.fn_modifiers.is_some())
+            && config.preservation.base_modifiers.is_some()
+                == config.preservation.fn_modifiers.is_some(),
+        "Schema version 3 requires preservation.base_modifiers and preservation.fn_modifiers; version 2 cannot contain them"
+    );
+    let (base, base_modifiers) = config.base.apply(
+        "base",
+        config.preservation.base,
+        config.preservation.base_modifiers,
+    )?;
+    let (fn_layer, fn_modifiers) = config.fn_layer.apply(
+        "fn",
+        config.preservation.fn_layer,
+        config.preservation.fn_modifiers,
+    )?;
     let raw = CurrentKeymaps {
         schema_version: 1,
         model: config.model,
         serial: config.serial,
         mode: config.mode,
-        base: config.base.apply("base", config.preservation.base)?,
-        fn_layer: config.fn_layer.apply("fn", config.preservation.fn_layer)?,
+        base,
+        fn_layer,
+        modifiers: base_modifiers
+            .zip(fn_modifiers)
+            .map(|(base, fn_layer)| ModifierKeymaps { base, fn_layer }),
     };
     raw.validate()?;
     Ok(raw)
@@ -290,21 +448,36 @@ pub(super) fn to_toml(raw: &CurrentKeymaps) -> Result<String> {
     raw.validate()?;
     validate_layout(&raw.model, "hhkb-us")?;
     let mut out = format!(
-        "# Physical labels appear above each row; strings below are assigned actions.\n# Base and Fn are independent. Zero/unknown actions retain their raw bytes.\nschema_version = 2\nlayout = \"hhkb-us\"\nmodel = {}\nserial = {}\nmode = {}\n",
+        "# Physical labels appear above each row; strings below are assigned actions.\n# Base and Fn are independent. Zero/unknown actions retain their raw bytes.\nschema_version = {}\nlayout = \"hhkb-us\"\nmodel = {}\nserial = {}\nmode = {}\n",
+        if raw.modifiers.is_some() { 3 } else { 2 },
         quoted(&raw.model),
         quoted(&raw.serial),
         raw.mode
     );
     for (layer, map) in [("base", &raw.base), ("fn", &raw.fn_layer)] {
         out.push_str(&format!("\n[{layer}]\n"));
-        let visual = VisualLayer::from_map(map);
+        let modifiers = raw.modifiers.as_ref().map(|m| {
+            if layer == "base" {
+                &m.base
+            } else {
+                &m.fn_layer
+            }
+        });
+        let visual = VisualLayer::from_map(layer, map, modifiers);
         for (row, actions) in ROWS.iter().zip(visual.rows()) {
             let (labels, values) = render_row(row, actions);
             out.push_str(&format!("{labels}\n{values}\n"));
         }
     }
     out.push_str("\n# Preserve these bytes: index 0, then indices 61..127. No physical key labels.\n[preservation]\n");
-    for (layer, map) in [("base", &raw.base), ("fn", &raw.fn_layer)] {
+    let mut preserved = vec![("base", &raw.base), ("fn", &raw.fn_layer)];
+    if let Some(modifiers) = &raw.modifiers {
+        preserved.extend([
+            ("base_modifiers", &modifiers.base),
+            ("fn_modifiers", &modifiers.fn_layer),
+        ]);
+    }
+    for (layer, map) in preserved {
         let values: Vec<_> = std::iter::once(map.0[0])
             .chain(map.0[61..].iter().copied())
             .map(|byte| format!("0x{byte:02X}"))
@@ -323,21 +496,46 @@ pub fn diff_keymaps(before: &CurrentKeymaps, after: &CurrentKeymaps) -> Result<V
         before.model == after.model && before.serial == after.serial && before.mode == after.mode,
         "Cannot compare configurations for different devices or modes"
     );
+    ensure!(
+        after.modifiers.is_none() || before.modifiers.is_some(),
+        "Shortcut diff requires the current modifier maps"
+    );
     let mut changes = Vec::new();
     for (layer, old, new) in [
         ("Base", &before.base, &after.base),
         ("Fn", &before.fn_layer, &after.fn_layer),
     ] {
+        let old_modifiers = before.modifiers.as_ref().map(|m| {
+            if layer == "Base" {
+                &m.base
+            } else {
+                &m.fn_layer
+            }
+        });
+        // Legacy imports preserve the current modifier masks.
+        let new_modifiers = after
+            .modifiers
+            .as_ref()
+            .map(|m| {
+                if layer == "Base" {
+                    &m.base
+                } else {
+                    &m.fn_layer
+                }
+            })
+            .or(old_modifiers);
         // Report physical changes in the same order as the visual document.
         for row in &ROWS {
             for (column, label) in row.labels.iter().enumerate() {
                 let index = row.first - column;
-                if old.0[index] != new.0[index] {
+                let old_mask = old_modifiers.map_or(0, |m| m.0[index]);
+                let new_mask = new_modifiers.map_or(0, |m| m.0[index]);
+                if old.0[index] != new.0[index] || old_mask != new_mask {
                     changes.push(format!(
                         "{layer}: physical {label} ({}): {} -> {}",
                         row.name,
-                        action_name(old.0[index]),
-                        action_name(new.0[index])
+                        assignment_name(old.0[index], old_mask),
+                        assignment_name(new.0[index], new_mask)
                     ));
                 }
             }
@@ -346,6 +544,14 @@ pub fn diff_keymaps(before: &CurrentKeymaps, after: &CurrentKeymaps) -> Result<V
             if old.0[index] != new.0[index] {
                 changes.push(format!(
                     "{layer}: preserved byte {index}: raw:0x{:02X} -> raw:0x{:02X}",
+                    old.0[index], new.0[index]
+                ));
+            }
+            if let (Some(old), Some(new)) = (old_modifiers, new_modifiers)
+                && old.0[index] != new.0[index]
+            {
+                changes.push(format!(
+                    "{layer}: preserved modifier byte {index}: raw:0x{:02X} -> raw:0x{:02X}",
                     old.0[index], new.0[index]
                 ));
             }
@@ -472,8 +678,21 @@ pub fn format_toml(text: &str) -> Result<String> {
     }
     let spans: DocumentSpans = toml::from_str(text)?;
     let mut edits = Vec::new();
-    for (map, layer) in [(&raw.base, &spans.base), (&raw.fn_layer, &spans.fn_layer)] {
-        let visual = VisualLayer::from_map(map);
+    for (layer_name, map, layer, modifiers) in [
+        (
+            "base",
+            &raw.base,
+            &spans.base,
+            raw.modifiers.as_ref().map(|m| &m.base),
+        ),
+        (
+            "fn",
+            &raw.fn_layer,
+            &spans.fn_layer,
+            raw.modifiers.as_ref().map(|m| &m.fn_layer),
+        ),
+    ] {
+        let visual = VisualLayer::from_map(layer_name, map, modifiers);
         for ((row, values), span) in ROWS.iter().zip(visual.rows()).zip(layer.rows()) {
             let range = span.span();
             let line_start = text[..range.start].rfind('\n').map_or(0, |i| i + 1);
@@ -536,6 +755,7 @@ mod tests {
             mode: 0,
             base: maps[0].clone(),
             fn_layer: maps[2].clone(),
+            modifiers: None,
         }
     }
 
@@ -590,6 +810,9 @@ mod tests {
             ["LAlt", "Fn", "Space", "RMeta", "RAlt"]
         );
         assert_eq!(CurrentKeymaps::from_toml(&text).unwrap(), raw);
+        assert_eq!(doc.fn_layer.q_row[1], "Reserved");
+        assert_eq!(doc.fn_layer.home_row[0], "Reserved");
+        assert_eq!(doc.fn_layer.shift_row[11], "Reserved");
         assert_eq!(format_toml(&text).unwrap(), text);
         let row_lines: Vec<_> = text
             .lines()
@@ -610,6 +833,86 @@ mod tests {
     }
 
     #[test]
+    fn reserved_fn_keys_cannot_be_remapped_in_rows_or_raw_arrays() {
+        let raw = baseline();
+        for (row, column, index, physical) in [
+            ("q_row", 1, 44, "Q"),
+            ("home_row", 0, 31, "Ctrl"),
+            ("shift_row", 11, 7, "RShift"),
+        ] {
+            for version in [2, 3] {
+                let mut config = raw.clone();
+                if version == 3 {
+                    config.modifiers = Some(ModifierKeymaps {
+                        base: Keymap([0; 128]),
+                        fn_layer: Keymap([0; 128]),
+                    });
+                }
+                let text = config.to_visual_toml().unwrap();
+                let mut document: toml::Value = toml::from_str(&text).unwrap();
+                document["fn"][row][column] = toml::Value::String("A".into());
+                let error = format!(
+                    "{:#}",
+                    CurrentKeymaps::from_toml(&toml::to_string(&document).unwrap()).unwrap_err()
+                );
+                assert!(error.contains(&format!("physical {physical}")), "{error}");
+                assert!(error.contains("Reserved"), "{error}");
+                if version == 3 {
+                    document["fn"][row][column] = toml::Value::String("Ctrl+(M)".into());
+                    assert!(
+                        CurrentKeymaps::from_toml(&toml::to_string(&document).unwrap()).is_err()
+                    );
+                }
+            }
+            let mut modified = raw.clone();
+            modified.fn_layer.0[index] = 4;
+            assert!(
+                CurrentKeymaps::from_toml(&toml::to_string_pretty(&modified).unwrap()).is_err()
+            );
+            assert!(
+                modified
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains(physical)
+            );
+            let mut modified = raw.clone();
+            modified.modifiers = Some(ModifierKeymaps {
+                base: Keymap([0; 128]),
+                fn_layer: Keymap([0; 128]),
+            });
+            modified.modifiers.as_mut().unwrap().fn_layer.0[index] = 1;
+            assert!(
+                CurrentKeymaps::from_toml(&toml::to_string_pretty(&modified).unwrap()).is_err()
+            );
+            assert!(
+                modified
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains(physical)
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_marker_is_only_accepted_at_fn_reserved_positions() {
+        let raw = baseline();
+        let mut document: toml::Value = toml::from_str(&raw.to_visual_toml().unwrap()).unwrap();
+        document["base"]["q_row"][1] = toml::Value::String("Reserved".into());
+        assert!(CurrentKeymaps::from_toml(&toml::to_string(&document).unwrap()).is_err());
+        document["base"]["q_row"][1] = toml::Value::String("Q".into());
+        document["fn"]["q_row"][1] = toml::Value::String("InvalidKey".into());
+        assert_eq!(
+            CurrentKeymaps::from_toml(&toml::to_string(&document).unwrap()).unwrap(),
+            raw
+        );
+        let formatted = format_toml(&toml::to_string(&document).unwrap()).unwrap();
+        assert!(formatted.contains("\"Reserved\""));
+        assert!(!formatted.contains("\"InvalidKey\""));
+    }
+
+    #[test]
     fn all_action_bytes_and_nonphysical_bytes_are_lossless() {
         for byte in 0..=255 {
             assert_eq!(action_byte(&action_name(byte)).unwrap(), byte);
@@ -619,14 +922,145 @@ mod tests {
         for offset in [0u8, 128] {
             raw.base = Keymap(std::array::from_fn(|i| (i as u8).wrapping_add(offset)));
             raw.fn_layer = Keymap(std::array::from_fn(|i| {
-                255 - (i as u8).wrapping_add(offset)
+                if FN_RESERVED.iter().any(|(reserved, _)| *reserved == i) {
+                    0
+                } else {
+                    255 - (i as u8).wrapping_add(offset)
+                }
             }));
             let text = raw.to_visual_toml().unwrap();
             assert_eq!(CurrentKeymaps::from_toml(&text).unwrap(), raw);
             assert_eq!(format_toml(&text).unwrap(), text);
         }
-        assert_eq!(action_name(0), "raw:0x00");
-        assert_eq!(action_name(0xe8), "raw:0xE8");
+        assert_eq!(action_name(0), "InvalidKey");
+        assert_eq!(action_name(0xe8), "VolumeDown");
+        assert_eq!(action_name(0xee), "raw:0xEE");
+    }
+
+    #[test]
+    fn shortcut_rows_export_format_diff_and_remove_modifiers() {
+        let mut before = baseline();
+        before.modifiers = Some(ModifierKeymaps {
+            base: Keymap([0; 128]),
+            fn_layer: Keymap([0; 128]),
+        });
+        let mut doc: toml::Value = toml::from_str(&before.to_visual_toml().unwrap()).unwrap();
+        assert_eq!(doc["schema_version"].as_integer(), Some(3));
+        doc["base"]["home_row"][1] = toml::Value::String("Ctrl+Shift+C".into());
+        doc["fn"]["q_row"][5] = toml::Value::String("RCtrl+RAlt+Delete".into());
+        let text = toml::to_string(&doc).unwrap();
+        let after = CurrentKeymaps::from_toml(&text).unwrap();
+        assert_eq!(after.base.0[30], 0x06);
+        assert_eq!(after.modifiers.as_ref().unwrap().base.0[30], 0x03);
+        assert_eq!(after.fn_layer.0[40], 0x4c);
+        assert_eq!(after.modifiers.as_ref().unwrap().fn_layer.0[40], 0x50);
+        assert_eq!(
+            diff_keymaps(&before, &after).unwrap(),
+            [
+                "Base: physical A (home_row): A -> LCtrl+LShift+C",
+                "Fn: physical T (q_row): T -> RCtrl+RAlt+Delete",
+            ]
+        );
+        let formatted = format_toml(&text).unwrap();
+        assert_eq!(format_toml(&formatted).unwrap(), formatted);
+        assert_eq!(CurrentKeymaps::from_toml(&formatted).unwrap(), after);
+        assert_eq!(
+            CurrentKeymaps::from_toml(&after.to_toml().unwrap()).unwrap(),
+            after
+        );
+        doc["base"]["home_row"][1] = toml::Value::String("C".into());
+        let removed = CurrentKeymaps::from_toml(&toml::to_string(&doc).unwrap()).unwrap();
+        assert_eq!(removed.modifiers.as_ref().unwrap().base.0[30], 0);
+        assert_eq!(
+            diff_keymaps(&after, &removed).unwrap(),
+            ["Base: physical A (home_row): LCtrl+LShift+C -> C",]
+        );
+    }
+
+    #[test]
+    fn shortcut_documents_preserve_all_four_maps_and_validate_metadata() {
+        let mut raw = baseline();
+        raw.modifiers = Some(ModifierKeymaps {
+            base: Keymap(std::array::from_fn(|i| i as u8)),
+            fn_layer: Keymap(std::array::from_fn(|i| {
+                if FN_RESERVED.iter().any(|(reserved, _)| *reserved == i) {
+                    0
+                } else {
+                    255 - i as u8
+                }
+            })),
+        });
+        let text = raw.to_visual_toml().unwrap();
+        assert_eq!(CurrentKeymaps::from_toml(&text).unwrap(), raw);
+        assert_eq!(format_toml(&text).unwrap(), text);
+        let document: toml::Value = toml::from_str(&text).unwrap();
+        for field in ["base_modifiers", "fn_modifiers"] {
+            let mut bad = document.clone();
+            bad["preservation"].as_table_mut().unwrap().remove(field);
+            assert!(CurrentKeymaps::from_toml(&toml::to_string(&bad).unwrap()).is_err());
+            let mut bad = document.clone();
+            bad["preservation"][field].as_array_mut().unwrap().pop();
+            assert!(CurrentKeymaps::from_toml(&toml::to_string(&bad).unwrap()).is_err());
+        }
+        assert!(
+            CurrentKeymaps::from_toml(&text.replace("schema_version = 3", "schema_version = 2"))
+                .is_err()
+        );
+        let mut bad = document;
+        bad["fn"]["q_row"][5] = toml::Value::String("Ctrl+A+S".into());
+        let error = format!(
+            "{:#}",
+            CurrentKeymaps::from_toml(&toml::to_string(&bad).unwrap()).unwrap_err()
+        );
+        assert!(error.contains("fn.q_row, position 6 (physical T)"));
+    }
+
+    #[test]
+    fn official_tool_catalog_has_friendly_names() {
+        let fixture = include_str!("../../tests/fixtures/official-action-codes.hex");
+        for code in fixture
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .flat_map(str::split_whitespace)
+        {
+            let byte = u8::from_str_radix(code, 16).unwrap();
+            let name = action_name(byte);
+            assert!(
+                !name.starts_with("raw:"),
+                "Official code {code} has no name"
+            );
+            assert_eq!(action_byte(&name).unwrap(), byte);
+        }
+    }
+
+    #[test]
+    fn official_special_actions_use_verified_bytes_and_labels() {
+        for (byte, canonical, label) in [
+            (0x00, "InvalidKey", "Invalid Key"),
+            (0x02, "Fn2", "Function2"),
+            (0x32, "NonUSHash", "NonUSHash"),
+            (0x64, "NonUSBackslash", "NonUSBackslash"),
+            (0x65, "Menu", "Application Key"),
+            (0x66, "Power", "Power"),
+            (0x78, "Stop", "Stop"),
+            (0x87, "Ro", "International1"),
+            (0x88, "Kana", "Kana"),
+            (0x89, "Yen", "International3"),
+            (0x8a, "Henkan", "Henkan"),
+            (0x8b, "Muhenkan", "Muhenkan"),
+            (0x90, "MacKana", "KanaMac"),
+            (0x91, "MacEisu", "Alphanumeric characters (Mac)"),
+            (0xe8, "VolumeDown", "Volume Down"),
+            (0xe9, "VolumeUp", "Volume Up"),
+            (0xea, "Mute", "Mute"),
+            (0xeb, "Eject", "Eject"),
+            (0xec, "BrightnessUp", "Brightness Up"),
+            (0xed, "BrightnessDown", "Brightness Down"),
+        ] {
+            assert_eq!(action_name(byte), canonical);
+            assert_eq!(action_byte(label).unwrap(), byte);
+            assert_eq!(action_byte(&format!("raw:0x{byte:02X}")).unwrap(), byte);
+        }
     }
 
     #[test]
@@ -637,6 +1071,13 @@ mod tests {
             ("CTRL", 0xe0),
             ("LeftShift", 0xe1),
             ("LWin", 0xe3),
+            ("Left Win", 0xe3),
+            ("Right Command", 0xe7),
+            ("volume_up", 0xe9),
+            ("Brightness Down", 0xed),
+            ("Keypad /", 0x54),
+            ("LDiamond", 0x8b),
+            ("RDiamond", 0x8a),
             ("pgdn", 0x4e),
             ("Backslash", 0x31),
             ("raw:0xab", 0xab),

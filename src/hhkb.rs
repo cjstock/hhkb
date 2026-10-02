@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use hidapi::{HidApi, HidDevice};
 
-use crate::config::{CurrentKeymaps, Keymap};
+use crate::config::{CurrentKeymaps, Keymap, ModifierKeymaps};
 use crate::utils::parse_string_from;
 
 const SELECTORS: [[u8; 2]; 4] = [[0, 0], [0x10, 0], [0, 1], [0x10, 1]];
@@ -40,7 +40,7 @@ pub struct HhkbInfo {
     pub running_firmware: u8,
 }
 
-/// Full preservation snapshot, in selector order 00/00, 10/00, 00/01, 10/01.
+/// Full snapshot: base keys, base modifiers, Fn keys, Fn modifiers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeymapSnapshot {
     pub info: HhkbInfo,
@@ -58,6 +58,10 @@ impl KeymapSnapshot {
             mode: self.mode,
             base: self.maps[0].clone(),
             fn_layer: self.maps[2].clone(),
+            modifiers: Some(ModifierKeymaps {
+                base: self.maps[1].clone(),
+                fn_layer: self.maps[3].clone(),
+            }),
         }
     }
 }
@@ -241,6 +245,10 @@ impl<T: Transport> Protocol<'_, T> {
         let mut expected = before.clone();
         expected.maps[0] = config.base.clone();
         expected.maps[2] = config.fn_layer.clone();
+        if let Some(modifiers) = &config.modifiers {
+            expected.maps[1] = modifiers.base.clone();
+            expected.maps[3] = modifiers.fn_layer.clone();
+        }
         self.session(|| {
             let info = self.info()?;
             ensure!(
@@ -303,6 +311,22 @@ pub fn validate_identity(config: &CurrentKeymaps, snapshot: &KeymapSnapshot) -> 
         "Device serial mismatch"
     );
     ensure!(config.mode == snapshot.mode, "Device mode mismatch");
+    if let Some(modifiers) = &config.modifiers
+        && (modifiers.base != snapshot.maps[1] || modifiers.fn_layer != snapshot.maps[3])
+    {
+        let supported = snapshot
+            .info
+            .app_firm_version
+            .strip_prefix("A0.")
+            .and_then(|minor| minor.parse::<u16>().ok())
+            .is_some_and(|minor| minor >= 48);
+        ensure!(
+            supported && snapshot.info.running_firmware == 0,
+            "Shortcut modifier edits require running HYBRID application firmware A0.48 or later; found {} (running firmware {})",
+            snapshot.info.app_firm_version,
+            snapshot.info.running_firmware
+        );
+    }
     Ok(())
 }
 
@@ -538,6 +562,109 @@ mod tests {
         assert_eq!(Protocol(&mock).snapshot().unwrap(), original);
         mock.complete();
     }
+    #[test]
+    fn writes_shortcut_keys_and_masks_and_checks_modifier_readback() {
+        let mut config = snapshot().current_keymaps();
+        config.base.0[30] = 0x06; // Physical A -> Ctrl+Shift+C.
+        config.fn_layer.0[40] = 0x4c; // Physical T -> RCtrl+RAlt+Delete.
+        let modifiers = config.modifiers.as_mut().unwrap();
+        modifiers.base.0[30] = 0x03;
+        modifiers.fn_layer.0[40] = 0x50;
+        let mut write = baseline_write();
+        // Independent expected bytes in the captured first-block payloads;
+        // these expectations do not use the production packet encoder.
+        for report in &mut write {
+            if report[..4] == [0xaa, 0xaa, 0x86, 0x41] {
+                match (report[5], report[6]) {
+                    (0, 0) => report[7 + 30] = 0x06,
+                    (0x10, 0) => report[7 + 30] = 0x03,
+                    (0, 1) => report[7 + 40] = 0x4c,
+                    (0x10, 1) => report[7 + 40] = 0x50,
+                    _ => panic!("Unexpected selectors"),
+                }
+            }
+        }
+        let mut readback = startup();
+        for (block, report) in readback
+            .iter_mut()
+            .filter(|r| r[..3] == [0x55, 0x55, 0x87])
+            .enumerate()
+        {
+            match block {
+                0 => report[6 + 30] = 0x06,
+                3 => report[6 + 30] = 0x03,
+                6 => report[6 + 40] = 0x4c,
+                9 => report[6 + 40] = 0x50,
+                _ => {}
+            }
+        }
+        let (mock, result) = write_run(write.clone(), readback.clone(), &config);
+        result.unwrap();
+        mock.complete();
+        let reply = readback
+            .iter_mut()
+            .filter(|r| r[..3] == [0x55, 0x55, 0x87])
+            .nth(9)
+            .unwrap();
+        reply[6 + 40] = 0;
+        let (mock, result) = write_run(write, readback, &config);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("selector 10/01, byte 40")
+        );
+        mock.complete();
+    }
+
+    #[test]
+    fn legacy_imports_preserve_nonzero_modifier_maps() {
+        let mut initial = startup();
+        initial
+            .iter_mut()
+            .filter(|r| r[..3] == [0x55, 0x55, 0x87])
+            .nth(3)
+            .unwrap()[6 + 30] = 0x03;
+        let mock = Mock::new(initial.clone());
+        let before = Protocol(&mock).snapshot().unwrap();
+        mock.complete();
+        let mut config = before.current_keymaps();
+        config.modifiers = None;
+        let mut write = baseline_write();
+        write
+            .iter_mut()
+            .find(|r| r[..7] == [0xaa, 0xaa, 0x86, 0x41, 59, 0x10, 0])
+            .unwrap()[7 + 30] = 0x03;
+        let mock = Mock::new([initial.clone(), write, initial].concat());
+        Protocol(&mock).write_current(&config).unwrap();
+        mock.complete();
+    }
+
+    #[test]
+    fn rejects_shortcut_edits_on_old_or_boot_firmware_before_writing() {
+        for (minor, running) in [(47, 0), (48, 1)] {
+            let mut initial = startup();
+            initial[3][48] = minor / 10;
+            initial[3][49] = minor % 10;
+            initial[3][62] = running;
+            let mut config = snapshot().current_keymaps();
+            config.modifiers.as_mut().unwrap().base.0[30] = 1;
+            let mock = Mock::new(initial);
+            let error = Protocol(&mock)
+                .write_current(&config)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("A0.48"), "{error}");
+            assert!(
+                mock.writes
+                    .borrow()
+                    .iter()
+                    .all(|r| ![8, 0x86, 4, 7].contains(&r[3]))
+            );
+            mock.complete();
+        }
+    }
+
     #[test]
     fn independently_edits_layers_and_preserves_companions() {
         let before = snapshot();

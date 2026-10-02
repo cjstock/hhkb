@@ -24,7 +24,7 @@ enum Command {
     Export {
         #[arg(default_value = "hhkb.toml")]
         path: PathBuf,
-        /// Export the legacy version 1 byte arrays instead of keyboard rows.
+        /// Export version 1 byte arrays, including modifier maps, instead of rows.
         #[arg(long)]
         raw: bool,
     },
@@ -142,7 +142,7 @@ fn main() -> Result<()> {
             let backup = backup(&path, &snapshot.current_keymaps())?;
             println!("Backup saved to {}", backup.display());
             hhkb.write_current_keymaps(&config)?;
-            println!("Verified base, Fn, companion maps, sleep time, and mode.");
+            println!("Verified base/Fn keys and modifiers, sleep time, and mode.");
         }
         Some(Command::Diff { .. }) => {
             let config = imported.unwrap();
@@ -155,7 +155,7 @@ fn main() -> Result<()> {
                 for change in &changes {
                     println!("{change}");
                 }
-                println!("{} byte change(s).", changes.len());
+                println!("{} change(s).", changes.len());
             }
         }
         Some(Command::Format { .. }) => unreachable!(),
@@ -173,7 +173,7 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hhkb::config::Keymap;
+    use hhkb::config::{Keymap, ModifierKeymaps};
 
     #[test]
     fn formatting_upgrades_without_changing_bytes_and_keeps_invalid_input() {
@@ -193,6 +193,7 @@ mod tests {
             mode: 0,
             base: Keymap(std::array::from_fn(|i| i as u8)),
             fn_layer: Keymap([0; 128]),
+            modifiers: None,
         };
         save_new(&path, &config).unwrap();
         format_file(&path).unwrap();
@@ -225,7 +226,15 @@ mod tests {
             serial: "test".into(),
             mode: 0,
             base: Keymap([0; 128]),
-            fn_layer: Keymap([1; 128]),
+            fn_layer: Keymap(std::array::from_fn(|i| {
+                if [44, 31, 7].contains(&i) { 0 } else { 1 }
+            })),
+            modifiers: Some(ModifierKeymaps {
+                base: Keymap([0xa3; 128]),
+                fn_layer: Keymap(std::array::from_fn(|i| {
+                    if [44, 31, 7].contains(&i) { 0 } else { 0x50 }
+                })),
+            }),
         };
         save_new(&path, &config).unwrap();
         assert!(save_new(&path, &config).is_err());

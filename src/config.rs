@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+mod shortcut;
 mod visual;
+pub use shortcut::{assignment_name, parse_assignment};
 pub use visual::{action_byte, action_name, diff_keymaps, format_toml};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -41,7 +43,7 @@ impl<'de> Deserialize<'de> for Keymap {
     }
 }
 
-/// Version 1 exports only the verified current-mode base and Fn selectors.
+/// Current-mode key maps. Legacy files omit the modifier maps; new exports include them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CurrentKeymaps {
@@ -52,7 +54,21 @@ pub struct CurrentKeymaps {
     pub base: Keymap,
     #[serde(rename = "fn")]
     pub fn_layer: Keymap,
+    /// Absent in legacy files: preserve the device's existing modifier maps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modifiers: Option<ModifierKeymaps>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModifierKeymaps {
+    pub base: Keymap,
+    #[serde(rename = "fn")]
+    pub fn_layer: Keymap,
+}
+
+// Physical positions whose Fn-layer entries cannot be changed by the official tool.
+pub(crate) const FN_RESERVED: [(usize, &str); 3] = [(44, "Q"), (31, "Ctrl"), (7, "RShift")];
 
 impl CurrentKeymaps {
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -70,6 +86,16 @@ impl CurrentKeymaps {
             !self.model.is_empty() && !self.serial.is_empty(),
             "Device model and serial must be nonempty"
         );
+        for (index, physical) in FN_RESERVED {
+            anyhow::ensure!(
+                self.fn_layer.0[index] == 0
+                    && self
+                        .modifiers
+                        .as_ref()
+                        .is_none_or(|m| m.fn_layer.0[index] == 0),
+                "Fn physical {physical} (byte {index}) is Reserved and must have zero key and modifier bytes"
+            );
+        }
         Ok(())
     }
 
@@ -79,7 +105,7 @@ impl CurrentKeymaps {
             .get("schema_version")
             .and_then(toml::Value::as_integer)
             .ok_or_else(|| anyhow::anyhow!("schema_version must be an integer"))?;
-        if version == 2 {
+        if version == 2 || version == 3 {
             return visual::from_toml(text);
         }
         anyhow::ensure!(version == 1, "Unsupported schema version {version}");
@@ -196,6 +222,7 @@ mod raw_tests {
             mode: 0,
             base: Keymap(std::array::from_fn(|i| i as u8)),
             fn_layer: Keymap([0; 128]),
+            modifiers: None,
         }
     }
     #[test]
