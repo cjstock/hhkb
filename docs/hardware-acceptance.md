@@ -75,7 +75,7 @@ write failure, export overwrite refusal, and adjacent backups.
 ## Repeating the controlled check
 
 Build with `cargo build` and `cargo build --examples`. With USB access and
-mode 0, save a raw export and complete preservation baseline:
+mode 0, save a row export and complete preservation baseline:
 
 ```bash
 target/debug/hhkb export original.toml

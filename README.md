@@ -78,7 +78,7 @@ You can supply a different export path: `hhkb export original.toml`. Export
 refuses to overwrite existing files. From the source tree, prefix commands with
 `cargo run --`, for example `cargo run -- export`.
 
-Exports use schema version 3, with five complete rows in both `[base]` and
+Exports use schema version 1, with five complete rows in both `[base]` and
 `[fn]`. Each physical row stays on one line. Comments above the arrays label
 physical key positions; array strings are their assigned actions. For example:
 
@@ -115,11 +115,10 @@ masks.
 Both layers are complete and independent: changing base does not change Fn.
 On the Fn layer, physical Q, Ctrl, and RShift export as `Reserved`; their key
 and shortcut modifier bytes must remain zero. Import rejects assignments to
-those positions in both row and raw files. Older `InvalidKey` entries at those
-positions still load and are canonicalized to `Reserved` by `hhkb format`.
+those positions. Those three entries must read `Reserved`.
 Exact row lengths are required, and errors identify the layer, row, and
-physical position. The `[preservation]` section retains bytes without physical
-key labels from all four maps, including nonzero values. Keep this section when editing.
+physical position. An optional `[preservation]` section records only nonzero
+bytes without physical key labels from the four maps. Omitted bytes are zero.
 
 `hhkb diff [path]` defaults to `hhkb.toml`, checks device identity, and reports
 physical assignments and preservation bytes that would change. It performs
@@ -127,21 +126,15 @@ read sessions without issuing configuration-write commands.
 `hhkb format [path]` also defaults to `hhkb.toml` and works without a keyboard.
 It canonicalizes names, regenerates aligned label comments, and keeps user
 comments. Notes within multiline arrays move above the resulting one-line row.
-The formatter validates first and replaces the file atomically. It upgrades
-legacy raw files to rows, retaining their comments above the new document.
+The formatter validates first and replaces the file atomically.
 
 The row layout currently supports US-layout PD-KB800 models in mode `0`.
 Export device model, serial, layout, and mode identify the target keyboard.
-Legacy version 1 raw and version 2 row files still import. When they omit
-modifier maps, import preserves the device's current modifiers. Run
-`hhkb export` to create a fresh version 3 file before adding shortcuts.
-`hhkb export --raw original.toml` writes version 1 arrays including modifier
-maps; formatting that file produces version 3 rows. The
-[complete sanitized example](tests/fixtures/rows.toml) shows the older version
-2 layout. See [row-format details](docs/row-format.md).
+The [complete sanitized example](tests/fixtures/rows.toml) shows the format.
+See [row-format details](docs/row-format.md).
 
 Import validates the schema, rows/actions, mode, and connected device identity
-before writing. It saves the current raw configuration beside the input as
+before writing. It saves the current configuration beside the input as
 `<filename>.backup-<Unix timestamp in nanoseconds>.toml` and aborts if that save
 fails. It takes a fresh preservation snapshot, writes the requested layers
 alongside the requested modifier maps and unchanged sleep time, and verifies
@@ -150,13 +143,10 @@ readback is an error; configuration writes are not retried and no rollback is
 claimed.
 
 The library's `read_current_keymaps()` and `write_current_keymaps()` retain
-128-byte maps. `CurrentKeymaps::from_toml()` reads raw version 1 and row
-versions 2/3; `to_visual_toml()` produces rows and `to_toml()` produces raw
-version 1 arrays, including modifier maps when present. `read_snapshot()`
-exposes all four maps and sleep time.
+128-byte maps. `CurrentKeymaps::from_toml()` and `to_toml()` read and write the
+row format. `read_snapshot()` exposes all four maps and sleep time.
 See [verified protocol behavior](docs/protocol.md) and
-[hardware acceptance](docs/hardware-acceptance.md). The experimental legacy
-named-key structs are retained but are not used by this workflow.
+[hardware acceptance](docs/hardware-acceptance.md).
 
 ### Packet Sniffing / Wireshark
 

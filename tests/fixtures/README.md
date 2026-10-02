@@ -21,10 +21,11 @@ The tests replay the baseline exchange byte for byte, check the swap's three
 specific byte changes, and confirm manual Fn restoration returns all four maps
 to baseline. Fault tests use altered copies of these reports.
 
-`rows.toml` is the human-readable schema version 2 representation of the
+`rows.toml` is the human-readable schema version 1 representation of the
 captured startup base/Fn maps. Its serial is fictional; the public PD-KB800WNS
-model name identifies the supported US layout. Tests check that it decodes to
-exactly the captured maps, including every preserved byte.
+model name identifies the supported US layout. The nonphysical map bytes are
+all zero, so no preservation section is needed. Tests check that it decodes to
+exactly the captured maps.
 
 `official-action-codes.hex` is a code-only catalog extracted from the official
 Windows Professional Keymap Tool 2.0.1, rather than a USB capture. It covers

@@ -2,9 +2,9 @@
 
 ## Project Structure & Module Organization
 
-This Rust 2024 project provides a Linux CLI and library for the HHKB Professional Hybrid. `src/main.rs` queries keyboard information, DIP switches, mode, and the base keymap. `src/lib.rs` exposes the library modules. Keep USB HID protocol handling in `src/hhkb.rs`, configuration and key types in `src/config.rs`, and shared byte/string helpers in `src/utils.rs`. Configuration support is unfinished; `KeyboardConfig::new` currently contains `todo!()`.
+This Rust 2024 project provides a Linux CLI and library for the HHKB Professional Hybrid. `src/main.rs` handles configuration export, format, diff, and import, as well as keyboard information queries. `src/lib.rs` exposes the library modules. Keep USB HID protocol handling in `src/hhkb.rs`, configuration and key types in `src/config.rs`, and shared byte/string helpers in `src/utils.rs`.
 
-`scripts/device.sh` prepares USB packet capture. `README.md` documents setup and usage. There are currently no dedicated test or asset directories.
+`scripts/device.sh` prepares USB packet capture. `README.md` documents setup and usage. `tests/fixtures/` holds sanitized captures and configuration examples.
 
 ## Build, Test, and Development Commands
 
@@ -25,7 +25,7 @@ Follow standard rustfmt formatting with four-space indentation. Use `snake_case`
 
 ## Testing Guidelines
 
-No automated tests or coverage threshold are currently defined. Add hardware-independent unit tests in module-local `#[cfg(test)]` blocks; place public API integration tests in `tests/`. Use descriptive names such as `rejects_invalid_response_header`. Prioritize packet validation, string decoding, and configuration serialization. Document hardware checks separately, including keyboard mode and observed output.
+There is no coverage threshold. Add hardware-independent unit tests in module-local `#[cfg(test)]` blocks; place public API integration tests in `tests/`. Use descriptive names such as `rejects_invalid_response_header`. Prioritize packet validation, string decoding, and configuration serialization. Document hardware checks separately, including keyboard mode and observed output.
 
 ## Commit & Pull Request Guidelines
 
